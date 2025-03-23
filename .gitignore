@@ -1,0 +1,25 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+#ruff
+.ruff_cache
+
+# PyTorch Lightning logs
+lightning_logs/
+
+# TensorBoard logs
+tb_logs/
+
+# Checkpoints
+chkpt/
+
+# VSCode settings
+.vscode/

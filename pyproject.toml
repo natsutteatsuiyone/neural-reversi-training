@@ -1,0 +1,32 @@
+[project]
+name = "neural-reversi-training"
+version = "0.1.0"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "lightning>=2.5.0.post0",
+    "tensorboardx>=2.6.2.2",
+    "torch-scatter>=2.1.2",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+    "zstandard>=0.23.0",
+    "torch-sparse>=0.6.18",
+    "optuna>=4.2.0",
+    "ruff>=0.9.6",
+    "pandas>=2.2.3",
+    "scikit-learn>=1.6.1",
+    "pytorch-warmup>=0.2.0",
+]
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu124", marker = "platform_system != 'Darwin'"},
+]
+torchvision = [
+  { index = "pytorch-cu124", marker = "platform_system != 'Darwin'"},
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
