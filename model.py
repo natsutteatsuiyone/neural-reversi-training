@@ -4,8 +4,8 @@ import torch.nn.functional as F
 import lightning as L
 
 from dataset import NUM_FEATURES, SUM_OF_FEATURES
-from quant import q_floor, q_round
-from space_linear import SparseLinear, sparse_linear
+from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
+
 
 LBASE = 512
 L1_BASE = (LBASE // 2) + 1
@@ -35,10 +35,26 @@ class LayerStacks(nn.Module):
             self.score_scale * self.weight_scale_out
         )
 
-        self.l1_base = nn.Linear(L1_BASE, (L2 // 2) * count)
-        self.l1_ps = nn.Linear(L1_PS, (L2 // 2) * count)
-        self.l2 = nn.Linear(L2 * 2, L3 * count)
-        self.output = nn.Linear(L3, 1 * count)
+        self.l1_base = FakeQuantLinear(
+            L1_BASE, (L2 // 2) * count,
+            weight_scale=self.weight_scale_hidden,
+            bias_scale=self.weight_scale_hidden * self.quantized_one
+        )
+        self.l1_ps = FakeQuantLinear(
+            L1_PS, (L2 // 2) * count,
+            weight_scale=self.weight_scale_hidden,
+            bias_scale=self.weight_scale_hidden * self.quantized_one
+        )
+        self.l2 = FakeQuantLinear(
+            L2 * 2, L3 * count,
+            weight_scale=self.weight_scale_hidden,
+            bias_scale=self.weight_scale_hidden * self.quantized_one
+        )
+        self.output = FakeQuantLinear(
+            L3, 1 * count,
+            weight_scale=self.score_scale * self.weight_scale_out / self.quantized_one,
+            bias_scale=self.score_scale * self.weight_scale_out
+        )
 
         # Cached helper tensor for choosing outputs by bucket indices.
         # Initialized lazily in forward.
@@ -84,44 +100,29 @@ class LayerStacks(nn.Module):
         ls_indices = ply.flatten() // self.bucket_size
         indices = ls_indices + self.idx_offset
 
-        q_l1_weight = q_round(self.l1_base.weight, self.weight_scale_hidden)
-        q_l1_bias = q_round(self.l1_base.bias, self.weight_scale_hidden * self.quantized_one)
-        l1x_base = F.linear(x_base, q_l1_weight, q_l1_bias).reshape((-1, self.count, L2 // 2))
+        l1x_base = self.l1_base(x_base).reshape((-1, self.count, L2 // 2))
         l1x_base = l1x_base.view(-1, L2 // 2)[indices]
 
-        q_li_ps_weight = q_round(self.l1_ps.weight, self.weight_scale_hidden)
-        q_li_ps_bias = q_round(self.l1_ps.bias, self.weight_scale_hidden * self.quantized_one)
-        l1x_ps = F.linear(x_ps, q_li_ps_weight, q_li_ps_bias).reshape((-1, self.count, L2 // 2))
+        l1x_ps = self.l1_ps(x_ps).reshape((-1, self.count, L2 // 2))
         l1x_ps = l1x_ps.view(-1, L2 // 2)[indices]
 
         l1x = torch.cat([l1x_base, l1x_ps], dim=1)
 
         # multiply sqr crelu result by (127/128) to match quantized version
         l1x = torch.clamp( torch.cat([torch.pow(l1x, 2.0) * (127 / 128), l1x], dim=1), 0.0, 1.0)
-        l1x = q_floor(l1x, self.quantized_one)
+        l1x = fq_floor(l1x, self.quantized_one)
 
-        q_l2_weight = q_round(self.l2.weight, self.weight_scale_hidden)
-        q_l2_bias = q_round(self.l2.bias, self.weight_scale_hidden * self.quantized_one)
-        l2s_ = F.linear(l1x, q_l2_weight, q_l2_bias).reshape((-1, self.count, L3))
+        l2s_ = self.l2(l1x).reshape((-1, self.count, L3))
         l2c_ = l2s_.view(-1, L3)[indices]
 
         l2x_ = torch.clamp(l2c_, 0.0, 1.0)
-        l2x_ = q_floor(l2x_, self.quantized_one)
+        l2x_ = fq_floor(l2x_, self.quantized_one)
 
-        q_output_weight = q_round(
-            self.output.weight,
-            self.score_scale * self.weight_scale_out / self.quantized_one,
-        )
-        q_output_bias = q_round(
-            self.output.bias, self.score_scale * self.weight_scale_out
-        )
-        l3s_ = F.linear(l2x_, q_output_weight, q_output_bias).reshape(
-            (-1, self.count, 1)
-        )
+        l3s_ = self.output(l2x_).reshape((-1, self.count, 1))
         l3c_ = l3s_.view(-1, 1)[indices]
         l3x_ = l3c_
 
-        output = q_floor(l3x_, self.score_scale)
+        output = fq_floor(l3x_, self.score_scale)
         return output
 
     def get_coalesced_layer_stacks(self):
@@ -131,6 +132,7 @@ class LayerStacks(nn.Module):
                 l1_ps = nn.Linear(L1_PS, (L2 // 2))
                 l2 = nn.Linear(L2 * 2, L3)
                 output = nn.Linear(L3, 1)
+
                 l1_base.weight.data = self.l1_base.weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :]
                 l1_base.bias.data = self.l1_base.bias[i * (L2 // 2) : (i + 1) * (L2 // 2)]
                 l1_ps.weight.data = self.l1_ps.weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :]
@@ -139,6 +141,7 @@ class LayerStacks(nn.Module):
                 l2.bias.data = self.l2.bias[i * L3 : (i + 1) * L3]
                 output.weight.data = self.output.weight[i : (i + 1), :]
                 output.bias.data = self.output.bias[i : (i + 1)]
+
                 yield l1_base, l1_ps, l2, output
 
 
@@ -148,7 +151,12 @@ class PhaseSpecificInput(nn.Module):
         self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
-        self.input = SparseLinear(SUM_OF_FEATURES, L1_PS * self.count)
+        self.input = FakeQuantSparseLinear(
+            SUM_OF_FEATURES,
+            L1_PS * self.count,
+            weight_scale=quantized_one,
+            bias_scale=quantized_one
+        )
         self.idx_offset = None
         self._init_layers()
 
@@ -168,9 +176,7 @@ class PhaseSpecificInput(nn.Module):
             self.idx_offset = torch.arange(
                 0, m * self.count, self.count, device=ply.device
             )
-        q_weight = q_round(self.input.weight, self.quantized_one)
-        q_bias = q_round(self.input.bias, self.quantized_one)
-        x = sparse_linear(feature_indices, values, m, n, q_weight, q_bias).reshape(
+        x = self.input(feature_indices, values, m, n).reshape(
             (-1, self.count, L1_PS)
         )
 
@@ -206,7 +212,12 @@ class ReversiModel(L.LightningModule):
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
 
-        self.input = SparseLinear(SUM_OF_FEATURES, LBASE)
+        self.input = FakeQuantSparseLinear(
+            SUM_OF_FEATURES,
+            LBASE,
+            weight_scale=self.quantized_one,
+            bias_scale=self.quantized_one
+        )
         self.ps_input = PhaseSpecificInput(NUM_PS_BUCKETS, self.quantized_one)
         self.layer_stacks = LayerStacks(
             NUM_LS_BUCKETS,
@@ -245,14 +256,12 @@ class ReversiModel(L.LightningModule):
                     param.clamp_(group["min_weight"], group["max_weight"])
 
     def forward(self, feature_indices, values, m, n, mobility, ply):
-        q_input_weight = q_round(self.input.weight, self.quantized_one)
-        q_input_bias = q_round(self.input.bias, self.quantized_one)
-        x_base = sparse_linear(feature_indices, values, m, n, q_input_weight, q_input_bias)
+        x_base = self.input(feature_indices, values, m, n)
         x_base = torch.clamp(x_base, 0.0, 1.0)
 
         x_base_s = torch.split(x_base, LBASE // 2, dim=1)
         x_base = x_base_s[0] * x_base_s[1] * 127 / 128
-        x_base = q_floor(x_base, self.quantized_one)
+        x_base = fq_floor(x_base, self.quantized_one)
         x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 
         x_ps = self.ps_input(feature_indices, values, m, n, ply)
