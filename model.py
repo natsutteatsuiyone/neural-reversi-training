@@ -9,10 +9,10 @@ from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
 
 LBASE = 512
 L1_BASE = (LBASE // 2) + 1
-L1_PS = 128
+L1_PA = 128
 L2 = 16
 L3 = 64
-NUM_PS_BUCKETS = 6
+NUM_PA_BUCKETS = 6
 NUM_LS_BUCKETS = 60
 MAX_PLY = 60
 
@@ -40,8 +40,8 @@ class LayerStacks(nn.Module):
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.l1_ps = FakeQuantLinear(
-            L1_PS, (L2 // 2) * count,
+        self.l1_pa = FakeQuantLinear(
+            L1_PA, (L2 // 2) * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
@@ -65,8 +65,8 @@ class LayerStacks(nn.Module):
     def _init_layers(self):
         l1_base_weight = self.l1_base.weight
         l1_base_bias = self.l1_base.bias
-        l1_ps_weight = self.l1_ps.weight
-        l1_ps_bias = self.l1_ps.bias
+        l1_pa_weight = self.l1_pa.weight
+        l1_pa_bias = self.l1_pa.bias
         l2_weight = self.l2.weight
         l2_bias = self.l2.bias
         output_weight = self.output.weight
@@ -78,22 +78,22 @@ class LayerStacks(nn.Module):
                 # Force all layer stacks to be initialized in the same way.
                 l1_base_weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :] = l1_base_weight[ 0 : (L2 // 2), :]
                 l1_base_bias[i * (L2 // 2) : (i + 1) * (L2 // 2)] = l1_base_bias[0 : (L2 // 2)]
-                l1_ps_weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :] = l1_ps_weight[ 0 : (L2 // 2), :]
-                l1_ps_bias[i * (L2 // 2) : (i + 1) * (L2 // 2)] = l1_ps_bias[0 : (L2 // 2)]
+                l1_pa_weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :] = l1_pa_weight[ 0 : (L2 // 2), :]
+                l1_pa_bias[i * (L2 // 2) : (i + 1) * (L2 // 2)] = l1_pa_bias[0 : (L2 // 2)]
                 l2_weight[i * L3 : (i + 1) * L3, :] = l2_weight[0:L3, :]
                 l2_bias[i * L3 : (i + 1) * L3] = l2_bias[0:L3]
                 output_weight[i : i + 1, :] = output_weight[0:1, :]
 
         self.l1_base.weight = nn.Parameter(l1_base_weight)
         self.l1_base.bias = nn.Parameter(l1_base_bias)
-        self.l1_ps.weight = nn.Parameter(l1_ps_weight)
-        self.l1_ps.bias = nn.Parameter(l1_ps_bias)
+        self.l1_pa.weight = nn.Parameter(l1_pa_weight)
+        self.l1_pa.bias = nn.Parameter(l1_pa_bias)
         self.l2.weight = nn.Parameter(l2_weight)
         self.l2.bias = nn.Parameter(l2_bias)
         self.output.weight = nn.Parameter(output_weight)
         self.output.bias = nn.Parameter(output_bias)
 
-    def forward(self, x_base, x_ps, ply):
+    def forward(self, x_base, x_pa, ply):
         if self.idx_offset is None or self.idx_offset.shape[0] != x_base.shape[0]:
             self.idx_offset = torch.arange( 0, x_base.shape[0] * self.count, self.count, device=ply.device )
 
@@ -103,10 +103,10 @@ class LayerStacks(nn.Module):
         l1x_base = self.l1_base(x_base).reshape((-1, self.count, L2 // 2))
         l1x_base = l1x_base.view(-1, L2 // 2)[indices]
 
-        l1x_ps = self.l1_ps(x_ps).reshape((-1, self.count, L2 // 2))
-        l1x_ps = l1x_ps.view(-1, L2 // 2)[indices]
+        l1x_pa = self.l1_pa(x_pa).reshape((-1, self.count, L2 // 2))
+        l1x_pa = l1x_pa.view(-1, L2 // 2)[indices]
 
-        l1x = torch.cat([l1x_base, l1x_ps], dim=1)
+        l1x = torch.cat([l1x_base, l1x_pa], dim=1)
 
         # multiply sqr crelu result by (127/128) to match quantized version
         l1x = torch.clamp( torch.cat([torch.pow(l1x, 2.0) * (127 / 128), l1x], dim=1), 0.0, 1.0)
@@ -129,31 +129,31 @@ class LayerStacks(nn.Module):
         for i in range(self.count):
             with torch.no_grad():
                 l1_base = nn.Linear(L1_BASE, (L2 // 2))
-                l1_ps = nn.Linear(L1_PS, (L2 // 2))
+                l1_pa = nn.Linear(L1_PA, (L2 // 2))
                 l2 = nn.Linear(L2 * 2, L3)
                 output = nn.Linear(L3, 1)
 
                 l1_base.weight.data = self.l1_base.weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :]
                 l1_base.bias.data = self.l1_base.bias[i * (L2 // 2) : (i + 1) * (L2 // 2)]
-                l1_ps.weight.data = self.l1_ps.weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :]
-                l1_ps.bias.data = self.l1_ps.bias[i * (L2 // 2) : (i + 1) * (L2 // 2)]
+                l1_pa.weight.data = self.l1_pa.weight[i * (L2 // 2) : (i + 1) * (L2 // 2), :]
+                l1_pa.bias.data = self.l1_pa.bias[i * (L2 // 2) : (i + 1) * (L2 // 2)]
                 l2.weight.data = self.l2.weight[i * L3 : (i + 1) * L3, :]
                 l2.bias.data = self.l2.bias[i * L3 : (i + 1) * L3]
                 output.weight.data = self.output.weight[i : (i + 1), :]
                 output.bias.data = self.output.bias[i : (i + 1)]
 
-                yield l1_base, l1_ps, l2, output
+                yield l1_base, l1_pa, l2, output
 
 
-class PhaseSpecificInput(nn.Module):
+class PhaseAdaptiveInput(nn.Module):
     def __init__(self, count, quantized_one):
-        super(PhaseSpecificInput, self).__init__()
+        super(PhaseAdaptiveInput, self).__init__()
         self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
         self.input = FakeQuantSparseLinear(
             SUM_OF_FEATURES,
-            L1_PS * self.count,
+            L1_PA * self.count,
             weight_scale=quantized_one,
             bias_scale=quantized_one
         )
@@ -165,8 +165,8 @@ class PhaseSpecificInput(nn.Module):
         li_bias = self.input.bias
         with torch.no_grad():
             for i in range(1, self.count):
-                li_weight[:, i * L1_PS : (i + 1) * L1_PS] = li_weight[:, 0:L1_PS]
-                li_bias[i * L1_PS : (i + 1) * L1_PS] = li_bias[0:L1_PS]
+                li_weight[:, i * L1_PA : (i + 1) * L1_PA] = li_weight[:, 0:L1_PA]
+                li_bias[i * L1_PA : (i + 1) * L1_PA] = li_bias[0:L1_PA]
 
         self.input.weight = nn.Parameter(li_weight)
         self.input.bias = nn.Parameter(li_bias)
@@ -177,20 +177,20 @@ class PhaseSpecificInput(nn.Module):
                 0, m * self.count, self.count, device=ply.device
             )
         x = self.input(feature_indices, values, m, n).reshape(
-            (-1, self.count, L1_PS)
+            (-1, self.count, L1_PA)
         )
 
         indicies = ply.flatten() // self.bucket_size + self.idx_offset
-        x = x.view(-1, L1_PS)[indicies]
+        x = x.view(-1, L1_PA)[indicies]
         x = torch.clamp(x, 0.0, 1.0)
         return x
 
     def get_layers(self):
         for i in range(self.count):
             with torch.no_grad():
-                li = nn.Linear(SUM_OF_FEATURES, L1_PS)
-                li.weight.data = self.input.weight[:, i * L1_PS : (i + 1) * L1_PS]
-                li.bias.data = self.input.bias[i * L1_PS : (i + 1) * L1_PS]
+                li = nn.Linear(SUM_OF_FEATURES, L1_PA)
+                li.weight.data = self.input.weight[:, i * L1_PA : (i + 1) * L1_PA]
+                li.bias.data = self.input.bias[i * L1_PA : (i + 1) * L1_PA]
                 yield li
 
 
@@ -218,7 +218,7 @@ class ReversiModel(L.LightningModule):
             weight_scale=self.quantized_one,
             bias_scale=self.quantized_one
         )
-        self.ps_input = PhaseSpecificInput(NUM_PS_BUCKETS, self.quantized_one)
+        self.ps_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
         self.layer_stacks = LayerStacks(
             NUM_LS_BUCKETS,
             self.quantized_one,
@@ -264,9 +264,9 @@ class ReversiModel(L.LightningModule):
         x_base = fq_floor(x_base, self.quantized_one)
         x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 
-        x_ps = self.ps_input(feature_indices, values, m, n, ply)
+        x_pa = self.ps_input(feature_indices, values, m, n, ply)
 
-        return self.layer_stacks(x_base, x_ps, ply)
+        return self.layer_stacks(x_base, x_pa, ply)
 
     def step_(self, batch, batch_idx, loss_type):
         self._clip_weights()
