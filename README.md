@@ -55,7 +55,7 @@ uv run train.py --train_data ./data/train --val_data ./data/val --resume-from-ch
 
 ### Output
 
-- Checkpoints saved in `chkpt/`
+- Checkpoints saved in `ckpt/`
 - TensorBoard logs saved in `tb_logs/`
 - Best models saved based on validation loss
 

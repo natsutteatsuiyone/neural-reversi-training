@@ -7,9 +7,9 @@ from dataset import NUM_FEATURES, SUM_OF_FEATURES
 from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
 
 
-LBASE = 512
-L1_BASE = (LBASE // 2) + 1
-L1_PA = 128
+LBASE = 320
+L1_BASE = (LBASE // 2)
+L1_PA = 96 + 1
 L2 = 16
 L3 = 64
 NUM_PA_BUCKETS = 6
@@ -153,7 +153,7 @@ class PhaseAdaptiveInput(nn.Module):
         self.bucket_size = MAX_PLY // self.count
         self.input = FakeQuantSparseLinear(
             SUM_OF_FEATURES,
-            L1_PA * self.count,
+            (L1_PA - 1) * self.count,
             weight_scale=quantized_one,
             bias_scale=quantized_one
         )
@@ -165,8 +165,8 @@ class PhaseAdaptiveInput(nn.Module):
         li_bias = self.input.bias
         with torch.no_grad():
             for i in range(1, self.count):
-                li_weight[:, i * L1_PA : (i + 1) * L1_PA] = li_weight[:, 0:L1_PA]
-                li_bias[i * L1_PA : (i + 1) * L1_PA] = li_bias[0:L1_PA]
+                li_weight[:, i * (L1_PA - 1) : (i + 1) * (L1_PA - 1)] = li_weight[:, 0:(L1_PA - 1)]
+                li_bias[i * (L1_PA - 1) : (i + 1) * (L1_PA - 1)] = li_bias[0:(L1_PA - 1)]
 
         self.input.weight = nn.Parameter(li_weight)
         self.input.bias = nn.Parameter(li_bias)
@@ -177,20 +177,20 @@ class PhaseAdaptiveInput(nn.Module):
                 0, m * self.count, self.count, device=ply.device
             )
         x = self.input(feature_indices, values, m, n).reshape(
-            (-1, self.count, L1_PA)
+            (-1, self.count, (L1_PA - 1))
         )
 
         indicies = ply.flatten() // self.bucket_size + self.idx_offset
-        x = x.view(-1, L1_PA)[indicies]
+        x = x.view(-1, (L1_PA - 1))[indicies]
         x = torch.clamp(x, 0.0, 1.0)
         return x
 
     def get_layers(self):
         for i in range(self.count):
             with torch.no_grad():
-                li = nn.Linear(SUM_OF_FEATURES, L1_PA)
-                li.weight.data = self.input.weight[:, i * L1_PA : (i + 1) * L1_PA]
-                li.bias.data = self.input.bias[i * L1_PA : (i + 1) * L1_PA]
+                li = nn.Linear(SUM_OF_FEATURES, (L1_PA - 1))
+                li.weight.data = self.input.weight[:, i * (L1_PA - 1) : (i + 1) * (L1_PA - 1)]
+                li.bias.data = self.input.bias[i * (L1_PA - 1) : (i + 1) * (L1_PA - 1)]
                 yield li
 
 
@@ -236,6 +236,10 @@ class ReversiModel(L.LightningModule):
                 "params": [self.layer_stacks.l1_base.weight],
                 "min_weight": -max_hidden_weight,
                 "max_weight": max_hidden_weight,
+            },            {
+                "params": [self.layer_stacks.l1_pa.weight],
+                "min_weight": -max_hidden_weight,
+                "max_weight": max_hidden_weight,
             },
             {
                 "params": [self.layer_stacks.l2.weight],
@@ -262,9 +266,9 @@ class ReversiModel(L.LightningModule):
         x_base_s = torch.split(x_base, LBASE // 2, dim=1)
         x_base = x_base_s[0] * x_base_s[1] * 127 / 128
         x_base = fq_floor(x_base, self.quantized_one)
-        x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 
         x_pa = self.ps_input(feature_indices, values, m, n, ply)
+        x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
 
         return self.layer_stacks(x_base, x_pa, ply)
 

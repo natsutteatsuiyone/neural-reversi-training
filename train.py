@@ -57,9 +57,8 @@ def parse_args() -> argparse.Namespace:
         help="Seed for random number generator",
     )
     parser.add_argument(
-        "--resume-from-model",
+        "--resume-from-checkpoint",
         dest="resume_from_checkpoint",
-        help="Initializes training using the weights from the given .pt model",
     )
     parser.add_argument(
         "--lr",
@@ -117,16 +116,17 @@ def prepare_logger_and_callbacks() -> tuple:
     logger = TensorBoardLogger("tb_logs", name="reversi_model")
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
-    checkpoint_callback = ModelCheckpoint(
-        save_top_k=20,
+    epoch_checkpoint = ModelCheckpoint(
+        save_top_k=30,
         monitor="val_loss",
         mode="min",
-        dirpath="chkpt",
-        filename="reversi-{epoch:02d}-{val_loss:.4f}",
+        dirpath="ckpt/",
+        filename="{epoch}-{val_loss:.2f}",
+        save_on_train_epoch_end=True,
+        save_last=True,
     )
 
-    return logger, [checkpoint_callback, lr_monitor]
-
+    return logger, [epoch_checkpoint, lr_monitor]
 
 def main():
     args = parse_args()

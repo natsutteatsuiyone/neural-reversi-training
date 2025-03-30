@@ -19,7 +19,7 @@ lightning_logs/
 tb_logs/
 
 # Checkpoints
-chkpt/
+ckpt/
 
 # VSCode settings
 .vscode/
