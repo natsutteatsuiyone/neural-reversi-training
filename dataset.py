@@ -9,8 +9,10 @@ from torch.utils.data import IterableDataset
 NUM_FEATURE_PARAMS = [
     6561, 6561, 6561, 6561,
     6561, 6561, 6561, 6561,
-    6561, 6561,
     6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561,
 ]
 
 NUM_FEATURES = len(NUM_FEATURE_PARAMS)

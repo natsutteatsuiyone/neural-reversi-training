@@ -8,7 +8,6 @@ import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.utilities.model_summary import ModelSummary
 import random
 
 
@@ -29,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=8192 * 2,
+        default=8192 * 4,
         help="Batch size (applied inside FeatureDataset)",
     )
     parser.add_argument(
@@ -45,19 +44,13 @@ def parse_args() -> argparse.Namespace:
         help="Maximum number of epochs",
     )
     parser.add_argument(
-        "--val_check_interval",
-        type=float,
-        default=5000,
-        help="Validation check interval (steps or percentage)",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
         help="Seed for random number generator",
     )
     parser.add_argument(
-        "--resume-from-checkpoint",
+        "--resume_from_checkpoint",
         dest="resume_from_checkpoint",
     )
     parser.add_argument(
@@ -143,22 +136,20 @@ def main():
 
     if args.resume_from_checkpoint:
         model = ReversiModel.load_from_checkpoint(
-            args.resume_from_checkpoint, lr=args.lr, t_max=args.t_max
+            args.resume_from_checkpoint
         )
     else:
         model = ReversiModel(lr=args.lr, t_max=args.t_max)
     model = torch.compile(model)
 
     logger, callbacks = prepare_logger_and_callbacks()
-    summary = str(ModelSummary(model, max_depth=2))
-    logger.experiment.add_text("Model Summary", summary)
 
     trainer = L.Trainer(
         callbacks=callbacks,
         log_every_n_steps=500,
         logger=logger,
         max_epochs=args.max_epochs,
-        val_check_interval=args.val_check_interval,
+        precision="bf16-mixed",
     )
 
     torch.set_float32_matmul_precision("high")

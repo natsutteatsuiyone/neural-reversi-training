@@ -7,8 +7,8 @@ from dataset import NUM_FEATURES, SUM_OF_FEATURES
 from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
 
 
-LBASE = 320
-L1_BASE = (LBASE // 2)
+LBASE = 192
+L1_BASE = (LBASE // 2) + 1
 L1_PA = 96 + 1
 L2 = 16
 L3 = 64
@@ -207,7 +207,7 @@ class ReversiModel(L.LightningModule):
         self.t_max = t_max
         self.eta_min = eta_min
 
-        self.score_scale = 64.0
+        self.score_scale = 128.0
         self.weight_scale_hidden = 64.0
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
@@ -266,8 +266,10 @@ class ReversiModel(L.LightningModule):
         x_base_s = torch.split(x_base, LBASE // 2, dim=1)
         x_base = x_base_s[0] * x_base_s[1] * 127 / 128
         x_base = fq_floor(x_base, self.quantized_one)
+        x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 
         x_pa = self.ps_input(feature_indices, values, m, n, ply)
+        x_pa = fq_floor(x_pa, self.quantized_one)
         x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
 
         return self.layer_stacks(x_base, x_pa, ply)

@@ -1,14 +1,13 @@
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import train_test_split
+
 from sklearn.linear_model import LinearRegression
-from sklearn.neighbors import NearestNeighbors
-from sklearn.metrics import mean_squared_error, r2_score
+
 import argparse
 
 # Parse command line arguments
-parser = argparse.ArgumentParser(description='Train ProbCut models from CSV data')
-parser.add_argument('csv_path', type=str, help='Path to the input CSV file')
+parser = argparse.ArgumentParser(description="Train ProbCut models from CSV data")
+parser.add_argument("csv_path", type=str, help="Path to the input CSV file")
 args = parser.parse_args()
 
 df = pd.read_csv(args.csv_path)
@@ -16,14 +15,9 @@ df = pd.read_csv(args.csv_path)
 models = {}
 epsilon = 1e-8
 
-for ply, group in df.groupby('ply'):
-    X = group[['shallow_depth', 'deep_depth']].values
-    y = group['diff'].values
-
-    # Split data (training/test)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+for ply, group in df.groupby("ply"):
+    X_train = group[["shallow_depth", "deep_depth"]].values
+    y_train = group["diff"].values
 
     # ===== Model 1: Predicting mean error (diff) =====
     mean_model = LinearRegression()
@@ -34,10 +28,25 @@ for ply, group in df.groupby('ply'):
     residuals_train = y_train - y_train_pred
 
     # ===== Calculation of local mean absolute residuals (training data) =====
-    k_neighbors_train = min(50, len(X_train))
-    nbrs_train = NearestNeighbors(n_neighbors=k_neighbors_train, algorithm='auto').fit(X_train)
-    distances_train, indices_train = nbrs_train.kneighbors(X_train)
-    avg_abs_residuals_train = np.array([np.mean(np.abs(residuals_train[idx])) for idx in indices_train])
+    avg_abs_residuals_train = []
+    X_train_df = pd.DataFrame(X_train, columns=["shallow_depth", "deep_depth"])
+
+    for i in range(len(X_train)):
+        current_shallow_depth = X_train[i, 0]
+        current_deep_depth = X_train[i, 1]
+
+        # Find indices of all points with the same shallow_depth and deep_depth
+        neighbor_indices = X_train_df[
+            (X_train_df["shallow_depth"] == current_shallow_depth)
+            & (X_train_df["deep_depth"] == current_deep_depth)
+        ].index.tolist()
+
+        # Calculate average absolute residuals for these neighbors
+        avg_abs_residual = np.mean(np.abs(residuals_train[neighbor_indices]))
+        avg_abs_residuals_train.append(avg_abs_residual)
+
+    avg_abs_residuals_train = np.array(avg_abs_residuals_train)
+
     # For normal distribution, E(|ε|) = σ√(2/π), so σ = (mean absolute residual)*√(π/2)
     std_targets_train = avg_abs_residuals_train * np.sqrt(np.pi / 2)
     log_std_targets_train = np.log(std_targets_train + epsilon)
@@ -46,34 +55,19 @@ for ply, group in df.groupby('ply'):
     std_model = LinearRegression()
     std_model.fit(X_train, log_std_targets_train)
 
-    # Save models and test data to dictionary
     models[ply] = {
-        'mean_model': mean_model,
-        'std_model': std_model,
-        'X_test': X_test,
-        'y_test': y_test
+        "mean_model": mean_model,
+        "std_model": std_model,
     }
 
     print(f"Model construction completed for Ply {ply}.")
 
-print("\n--- Evaluation on test data ---")
-for ply, model_data in models.items():
-    mean_model = model_data['mean_model']
-    std_model = model_data['std_model']
-    X_test = model_data['X_test']
-    y_test = model_data['y_test']
-
-    # Evaluate mean error model
-    y_pred_mean = mean_model.predict(X_test)
-    mse_mean = mean_squared_error(y_test, y_pred_mean)
-    r2_mean = r2_score(y_test, y_pred_mean)
-    print(f"Ply {ply} - Mean Model: MSE: {mse_mean:.3f}, R^2: {r2_mean:.3f}")
 
 print("const PROBCUT_PARAMS: [ProbcutParams; 60] = [")
 
 for ply in range(60):
-    mean_model = models[ply]['mean_model']
-    std_model = models[ply]['std_model']
+    mean_model = models[ply]["mean_model"]
+    std_model = models[ply]["std_model"]
 
     print("    ProbcutParams {")
     print(f"        mean_intercept: {mean_model.intercept_:.10},")
