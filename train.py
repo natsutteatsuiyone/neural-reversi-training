@@ -54,6 +54,10 @@ def parse_args() -> argparse.Namespace:
         dest="resume_from_checkpoint",
     )
     parser.add_argument(
+        "--resume_from_weights",
+        dest="resume_from_weights",
+    )
+    parser.add_argument(
         "--lr",
         type=float,
         default=0.001,
@@ -138,6 +142,10 @@ def main():
         model = ReversiModel.load_from_checkpoint(
             args.resume_from_checkpoint
         )
+    elif args.resume_from_weights:
+        checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
+        model = ReversiModel(lr=args.lr, t_max=args.t_max)
+        model.load_state_dict(checkpoint["state_dict"])
     else:
         model = ReversiModel(lr=args.lr, t_max=args.t_max)
     model = torch.compile(model)
