@@ -10,6 +10,8 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 import random
 
+from model_sm import ReversiSmallModel
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -72,6 +74,10 @@ def parse_args() -> argparse.Namespace:
         default=3,
         help="Random skipping for FeatureDataset",
     )
+    parser.add_argument(
+        "--small_net",
+        action="store_true",
+    )
     return parser.parse_args()
 
 
@@ -97,7 +103,9 @@ def prepare_dataloaders(
         pin_memory=True,
     )
 
-    val_dataset = FeatureDataset(filepaths=val_files, batch_size=batch_size, random_skipping=0)
+    val_dataset = FeatureDataset(
+        filepaths=val_files, batch_size=batch_size, random_skipping=0
+    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -125,6 +133,7 @@ def prepare_logger_and_callbacks() -> tuple:
 
     return logger, [epoch_checkpoint, lr_monitor]
 
+
 def main():
     args = parse_args()
 
@@ -138,16 +147,20 @@ def main():
         args.random_skipping,
     )
 
-    if args.resume_from_checkpoint:
-        model = ReversiModel.load_from_checkpoint(
-            args.resume_from_checkpoint
+    if args.small_net:
+        model = ReversiSmallModel(
+            lr=args.lr,
+            t_max=args.t_max,
         )
-    elif args.resume_from_weights:
-        checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
-        model = ReversiModel(lr=args.lr, t_max=args.t_max)
-        model.load_state_dict(checkpoint["state_dict"])
     else:
-        model = ReversiModel(lr=args.lr, t_max=args.t_max)
+        if args.resume_from_checkpoint:
+            model = ReversiModel.load_from_checkpoint(args.resume_from_checkpoint)
+        elif args.resume_from_weights:
+            checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
+            model = ReversiModel(lr=args.lr, t_max=args.t_max)
+            model.load_state_dict(checkpoint["state_dict"])
+        else:
+            model = ReversiModel(lr=args.lr, t_max=args.t_max)
     model = torch.compile(model)
 
     logger, callbacks = prepare_logger_and_callbacks()
