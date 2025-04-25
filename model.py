@@ -182,7 +182,10 @@ class PhaseAdaptiveInput(nn.Module):
 
         indicies = ply.flatten() // self.bucket_size + self.idx_offset
         x = x.view(-1, (L1_PA - 1))[indicies]
-        x = torch.clamp(x, 0.0, 1.0)
+        x = F.leaky_relu(x, negative_slope=0.125)
+        x = torch.clamp(x, -0.125, 1.0 - 0.125)
+        x = torch.add(x, 16 / 127)
+        x = fq_floor(x, self.quantized_one)
         return x
 
     def get_layers(self):
@@ -218,7 +221,7 @@ class ReversiModel(L.LightningModule):
             weight_scale=self.quantized_one,
             bias_scale=self.quantized_one
         )
-        self.ps_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
+        self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
         self.layer_stacks = LayerStacks(
             NUM_LS_BUCKETS,
             self.quantized_one,
@@ -268,8 +271,7 @@ class ReversiModel(L.LightningModule):
         x_base = fq_floor(x_base, self.quantized_one)
         x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 
-        x_pa = self.ps_input(feature_indices, values, m, n, ply)
-        x_pa = fq_floor(x_pa, self.quantized_one)
+        x_pa = self.pa_input(feature_indices, values, m, n, ply)
         x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
 
         return self.layer_stacks(x_base, x_pa, ply)

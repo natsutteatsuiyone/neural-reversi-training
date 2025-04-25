@@ -57,7 +57,7 @@ class NNWriter:
         self.buf.extend(bias.flatten().numpy().tobytes())
         self.buf.extend(weight.flatten().numpy().tobytes())
 
-        for p in model.ps_input.get_layers():
+        for p in model.pa_input.get_layers():
             bias = (
                 p.bias.detach().cpu().mul(model.quantized_one).round().to(torch.int16)
             )

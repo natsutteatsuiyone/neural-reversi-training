@@ -191,7 +191,7 @@ class ReversiSmallModel(L.LightningModule):
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
 
-        self.ps_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
+        self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
         self.layer_stacks = LayerStacks(
             NUM_LS_BUCKETS,
             self.quantized_one,
@@ -229,7 +229,7 @@ class ReversiSmallModel(L.LightningModule):
                     param.clamp_(group["min_weight"], group["max_weight"])
 
     def forward(self, feature_indices, values, m, n, mobility, ply):
-        x_pa = self.ps_input(feature_indices, values, m, n, ply)
+        x_pa = self.pa_input(feature_indices, values, m, n, ply)
         x_pa = fq_floor(x_pa, self.quantized_one)
         x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
 

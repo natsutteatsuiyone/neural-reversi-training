@@ -40,7 +40,7 @@ class NNWriter:
             self.write_fc_layer(model, output, is_output=True)
 
     def write_input_layer(self, model: M.ReversiSmallModel) -> None:
-        for p in model.ps_input.get_layers():
+        for p in model.pa_input.get_layers():
             bias = (
                 p.bias.detach().cpu().mul(model.quantized_one).round().to(torch.int16)
             )
