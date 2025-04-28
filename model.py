@@ -3,8 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 
-from dataset import NUM_FEATURES, SUM_OF_FEATURES
 from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
+
+NUM_FEATURE_PARAMS = [
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561,
+]
+
+NUM_FEATURES = len(NUM_FEATURE_PARAMS)
+SUM_OF_FEATURES = sum(NUM_FEATURE_PARAMS)
 
 
 LBASE = 192
@@ -183,7 +194,7 @@ class PhaseAdaptiveInput(nn.Module):
         indicies = ply.flatten() // self.bucket_size + self.idx_offset
         x = x.view(-1, (L1_PA - 1))[indicies]
         x = F.leaky_relu(x, negative_slope=0.125)
-        x = torch.clamp(x, -0.125, 1.0 - 0.125)
+        x = torch.clamp(x, -16 / 127, 1.0 - 16 / 127)
         x = torch.add(x, 16 / 127)
         x = fq_floor(x, self.quantized_one)
         return x

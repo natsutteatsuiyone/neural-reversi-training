@@ -31,11 +31,11 @@ class NNWriter:
 
         self.write_input_layer(model)
         for (
-            l1_ps,
+            l1_pa,
             l2,
             output,
         ) in model.layer_stacks.get_coalesced_layer_stacks():
-            self.write_fc_layer(model, l1_ps)
+            self.write_fc_layer(model, l1_pa)
             self.write_fc_layer(model, l2)
             self.write_fc_layer(model, output, is_output=True)
 

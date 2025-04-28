@@ -3,14 +3,14 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 from dataset import FeatureDataset, custom_collate_fn
-from model import ReversiModel
 import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
 import random
 
-from model_sm import ReversiSmallModel
+import model
+import model_sm
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,7 +75,7 @@ def parse_args() -> argparse.Namespace:
         help="Random skipping for FeatureDataset",
     )
     parser.add_argument(
-        "--small_net",
+        "--small",
         action="store_true",
     )
     return parser.parse_args()
@@ -87,14 +87,29 @@ def prepare_dataloaders(
     batch_size: int,
     num_workers: int,
     random_skipping: int,
+    small: bool,
 ) -> tuple:
     train_files = [str(p) for p in Path(train_dir).glob("*.zst")]
     random.shuffle(train_files)
     val_files = [str(p) for p in Path(val_dir).glob("*.zst")]
 
-    train_dataset = FeatureDataset(
-        filepaths=train_files, batch_size=batch_size, random_skipping=random_skipping
-    )
+    if small:
+        train_dataset = FeatureDataset(
+            filepaths=train_files,
+            batch_size=batch_size,
+            random_skipping=random_skipping,
+            num_features=model_sm.NUM_FEATURES,
+            num_feature_params=model_sm.NUM_FEATURE_PARAMS,
+        )
+    else:
+        train_dataset = FeatureDataset(
+            filepaths=train_files,
+            batch_size=batch_size,
+            random_skipping=random_skipping,
+            num_features=model.NUM_FEATURES,
+            num_feature_params=model.NUM_FEATURE_PARAMS,
+        )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
@@ -103,9 +118,22 @@ def prepare_dataloaders(
         pin_memory=True,
     )
 
-    val_dataset = FeatureDataset(
-        filepaths=val_files, batch_size=batch_size, random_skipping=0
-    )
+    if small:
+        val_dataset = FeatureDataset(
+            filepaths=val_files,
+            batch_size=batch_size,
+            random_skipping=0,
+            num_features=model_sm.NUM_FEATURES,
+            num_feature_params=model_sm.NUM_FEATURE_PARAMS,
+        )
+    else:
+        val_dataset = FeatureDataset(
+            filepaths=val_files,
+            batch_size=batch_size,
+            random_skipping=0,
+            num_features=model.NUM_FEATURES,
+            num_feature_params=model.NUM_FEATURE_PARAMS,
+        )
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -145,23 +173,26 @@ def main():
         args.batch_size,
         args.num_workers,
         args.random_skipping,
+        args.small,
     )
 
-    if args.small_net:
-        model = ReversiSmallModel(
+    if args.small:
+        reversi_model = model_sm.ReversiSmallModel(
             lr=args.lr,
             t_max=args.t_max,
         )
     else:
         if args.resume_from_checkpoint:
-            model = ReversiModel.load_from_checkpoint(args.resume_from_checkpoint)
+            reversi_model = model.ReversiModel.load_from_checkpoint(
+                args.resume_from_checkpoint
+            )
         elif args.resume_from_weights:
             checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
-            model = ReversiModel(lr=args.lr, t_max=args.t_max)
-            model.load_state_dict(checkpoint["state_dict"])
+            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.t_max)
+            reversi_model.load_state_dict(checkpoint["state_dict"])
         else:
-            model = ReversiModel(lr=args.lr, t_max=args.t_max)
-    model = torch.compile(model)
+            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.t_max)
+    reversi_model = torch.compile(reversi_model)
 
     logger, callbacks = prepare_logger_and_callbacks()
 
@@ -174,7 +205,9 @@ def main():
     )
 
     torch.set_float32_matmul_precision("high")
-    trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(
+        reversi_model, train_dataloaders=train_loader, val_dataloaders=val_loader
+    )
 
 
 if __name__ == "__main__":

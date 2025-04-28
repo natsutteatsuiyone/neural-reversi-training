@@ -6,17 +6,6 @@ from typing import List, Tuple
 
 from torch.utils.data import IterableDataset
 
-NUM_FEATURE_PARAMS = [
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561,
-]
-
-NUM_FEATURES = len(NUM_FEATURE_PARAMS)
-SUM_OF_FEATURES = sum(NUM_FEATURE_PARAMS)
 
 class FeatureDataset(IterableDataset):
     """
@@ -30,7 +19,15 @@ class FeatureDataset(IterableDataset):
             A higher value means more data is skipped (skip_prob = N / (N+1)).
             If 0, no skipping occurs.
     """
-    def __init__(self, filepaths: List[str], batch_size: int, random_skipping: float):
+
+    def __init__(
+        self,
+        filepaths: List[str],
+        batch_size: int,
+        random_skipping: float,
+        num_features: int,
+        num_feature_params: List[int],
+    ):
         super().__init__()
         self.filepaths = filepaths
         self.batch_size = batch_size
@@ -41,16 +38,16 @@ class FeatureDataset(IterableDataset):
         self.record_dtype = np.dtype(
             [
                 ("score", np.float32),
-                ("features", np.uint16, NUM_FEATURES),
+                ("features", np.uint16, num_features),
                 ("mobility", np.uint8),
                 ("ply", np.uint8),
             ]
         )
 
-        self.feature_cum_offsets = np.zeros(NUM_FEATURES, dtype=np.int64)
-        for i in range(1, NUM_FEATURES):
+        self.feature_cum_offsets = np.zeros(num_features, dtype=np.int64)
+        for i in range(1, num_features):
             self.feature_cum_offsets[i] = (
-                self.feature_cum_offsets[i - 1] + NUM_FEATURE_PARAMS[i - 1]
+                self.feature_cum_offsets[i - 1] + num_feature_params[i - 1]
             )
 
     def __iter__(self):
@@ -85,13 +82,17 @@ class FeatureDataset(IterableDataset):
                             try:
                                 chunk = reader.read(chunk_size)
                             except zstandard.ZstdError as e:
-                                print(f"Warning: Error reading chunk from {filepath}: {e}")
+                                print(
+                                    f"Warning: Error reading chunk from {filepath}: {e}"
+                                )
                                 break
                             except Exception as e:
-                                print(f"Warning: Unexpected error during reading {filepath}: {e}")
+                                print(
+                                    f"Warning: Unexpected error during reading {filepath}: {e}"
+                                )
 
                             if not chunk:
-                                break # End of file
+                                break  # End of file
 
                             buffer.extend(chunk)
                             num_full_records = len(buffer) // record_size
@@ -102,11 +103,14 @@ class FeatureDataset(IterableDataset):
                                 buffer = buffer[valid_bytes_len:]
 
                                 try:
-                                    arr = np.frombuffer(data_bytes, dtype=self.record_dtype)
+                                    arr = np.frombuffer(
+                                        data_bytes, dtype=self.record_dtype
+                                    )
                                 except ValueError as e:
-                                     print(f"Warning: Error converting buffer to numpy array from {filepath}. Buffer length: {len(data_bytes)}, Record size: {record_size}. Error: {e}")
-                                     continue
-
+                                    print(
+                                        f"Warning: Error converting buffer to numpy array from {filepath}. Buffer length: {len(data_bytes)}, Record size: {record_size}. Error: {e}"
+                                    )
+                                    continue
 
                                 if skip_prob > 0:
                                     mask = np.random.rand(arr.shape[0]) >= skip_prob
@@ -115,37 +119,48 @@ class FeatureDataset(IterableDataset):
                                     selected = arr
 
                                 if selected.size > 0:
-                                    if batch_buffer is None or batch_buffer.size == 0: # Check size if using np.empty
-                                         batch_buffer = selected
+                                    if (
+                                        batch_buffer is None or batch_buffer.size == 0
+                                    ):  # Check size if using np.empty
+                                        batch_buffer = selected
                                     else:
-                                         batch_buffer = np.concatenate((batch_buffer, selected))
+                                        batch_buffer = np.concatenate(
+                                            (batch_buffer, selected)
+                                        )
 
-
-                                while batch_buffer is not None and batch_buffer.shape[0] >= self.batch_size:
-                                    batch = batch_buffer[:self.batch_size]
+                                while (
+                                    batch_buffer is not None
+                                    and batch_buffer.shape[0] >= self.batch_size
+                                ):
+                                    batch = batch_buffer[: self.batch_size]
                                     yield self._process(batch)
-                                    batch_buffer = batch_buffer[self.batch_size:]
+                                    batch_buffer = batch_buffer[self.batch_size :]
                                     if batch_buffer.shape[0] == 0:
-                                        batch_buffer = np.empty((0,), dtype=self.record_dtype)
+                                        batch_buffer = np.empty(
+                                            (0,), dtype=self.record_dtype
+                                        )
 
             except FileNotFoundError:
                 print(f"Warning: File not found {filepath}, skipping.")
                 continue
             except zstandard.ZstdError as e:
-                 print(f"Warning: zstandard error opening or processing {filepath}: {e}")
-                 continue
+                print(f"Warning: zstandard error opening or processing {filepath}: {e}")
+                continue
             except Exception as e:
-                print(f"Warning: An unexpected error occurred processing {filepath}: {e}")
+                print(
+                    f"Warning: An unexpected error occurred processing {filepath}: {e}"
+                )
                 continue
 
         if batch_buffer is not None and batch_buffer.shape[0] >= self.batch_size:
-            batch = batch_buffer[:self.batch_size]
+            batch = batch_buffer[: self.batch_size]
             yield self._process(batch)
 
-
-    def _process(self, arr: np.ndarray, debug: bool = False) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _process(
+        self, arr: np.ndarray, debug: bool = False
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Converts a batch of Numpy arrays to PyTorch tensors.
-           Includes .copy() to handle potential stride issues with from_numpy.
+        Includes .copy() to handle potential stride issues with from_numpy.
         """
         features_with_offset = arr["features"] + self.feature_cum_offsets
         feature_indices = torch.from_numpy(features_with_offset.copy())

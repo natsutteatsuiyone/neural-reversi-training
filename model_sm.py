@@ -3,8 +3,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 
-from dataset import NUM_FEATURES, SUM_OF_FEATURES
 from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
+
+
+NUM_FEATURE_PARAMS = [
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561,
+]
+
+
+NUM_FEATURES = len(NUM_FEATURE_PARAMS)
+SUM_OF_FEATURES = sum(NUM_FEATURE_PARAMS)
 
 
 L1_PA = 64 + 1
@@ -39,7 +52,7 @@ class LayerStacks(nn.Module):
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
         self.l2 = FakeQuantLinear(
-            L2 * 2, L3 * count,
+            L2, L3 * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
@@ -91,7 +104,8 @@ class LayerStacks(nn.Module):
         l1x = l1x.view(-1, L2)[indices]
 
         # multiply sqr crelu result by (127/128) to match quantized version
-        l1x = torch.clamp( torch.cat([torch.pow(l1x, 2.0) * (127 / 128), l1x], dim=1), 0.0, 1.0)
+        # l1x = torch.clamp( torch.cat([torch.pow(l1x, 2.0) * (127 / 128), l1x], dim=1), 0.0, 1.0)
+        l1x = torch.clamp(l1x, 0.0, 1.0)
         l1x = fq_floor(l1x, self.quantized_one)
 
         l2s_ = self.l2(l1x).reshape((-1, self.count, L3))
@@ -161,7 +175,10 @@ class PhaseAdaptiveInput(nn.Module):
 
         indicies = ply.flatten() // self.bucket_size + self.idx_offset
         x = x.view(-1, (L1_PA - 1))[indicies]
-        x = torch.clamp(x, 0.0, 1.0)
+        x = F.leaky_relu(x, negative_slope=0.125)
+        x = torch.clamp(x, -16 / 127, 1.0 - 16 / 127)
+        x = torch.add(x, 16 / 127)
+        x = fq_floor(x, self.quantized_one)
         return x
 
     def get_layers(self):
@@ -230,7 +247,6 @@ class ReversiSmallModel(L.LightningModule):
 
     def forward(self, feature_indices, values, m, n, mobility, ply):
         x_pa = self.pa_input(feature_indices, values, m, n, ply)
-        x_pa = fq_floor(x_pa, self.quantized_one)
         x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
 
         return self.layer_stacks(x_pa, ply)
