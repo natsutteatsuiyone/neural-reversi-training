@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from space_linear import SparseLinear, sparse_linear
 
 
-class FakeQuantRound(torch.autograd.Function):
+class FakeQuantizeRound(torch.autograd.Function):
     """
     Custom autograd function for fake quantization using rounding.
     Quantizes values by rounding to the nearest multiple of 1/scale_factor.
@@ -23,7 +23,7 @@ class FakeQuantRound(torch.autograd.Function):
         return grad_output, None
 
 
-class FakeQuantFloor(torch.autograd.Function):
+class FakeQuantizeFloor(torch.autograd.Function):
     """
     Custom autograd function for fake quantization using floor operation.
     Quantizes values by flooring to the nearest lower multiple of 1/scale_factor.
@@ -31,14 +31,17 @@ class FakeQuantFloor(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, scale_factor):
+    def forward(ctx, x, scale_factor, qmin=None, qmax=None):
         # Quantize by flooring to the nearest lower value in the discrete set
-        return torch.floor(x * scale_factor) / scale_factor
+        if qmin is not None and qmax is not None:
+            x = torch.clamp(x, qmin, qmax)
+        x = torch.floor(x * scale_factor) / scale_factor
+        return x
 
     @staticmethod
     def backward(ctx, grad_output):
         # Straight-through estimator: pass the gradient through unchanged
-        return grad_output, None
+        return grad_output, None, None, None
 
 
 def fq_round(x, scale_factor):
@@ -52,10 +55,10 @@ def fq_round(x, scale_factor):
     Returns:
         Quantized tensor using round operation
     """
-    return FakeQuantRound.apply(x, scale_factor)
+    return FakeQuantizeRound.apply(x, scale_factor)
 
 
-def fq_floor(x, scale_factor):
+def fq_floor(x, scale_factor, qmin=None, qmax=None):
     """
     Helper function for quantization with floor operation.
 
@@ -66,10 +69,10 @@ def fq_floor(x, scale_factor):
     Returns:
         Quantized tensor using floor operation
     """
-    return FakeQuantFloor.apply(x, scale_factor)
+    return FakeQuantizeFloor.apply(x, scale_factor, qmin, qmax)
 
 
-class FakeQuantLinear(nn.Linear):
+class FakeQuantizeLinear(nn.Linear):
     """
     Linear layer with fake quantization of weights and biases.
     Wraps nn.Linear and applies q_round to weights and biases during forward pass.
@@ -80,16 +83,16 @@ class FakeQuantLinear(nn.Linear):
         in_features,
         out_features,
         weight_scale,
-        bias_scale=None,
+        bias_scale,
         bias=True,
         device=None,
         dtype=None,
     ):
-        super(FakeQuantLinear, self).__init__(
+        super(FakeQuantizeLinear, self).__init__(
             in_features, out_features, bias=bias, device=device, dtype=dtype
         )
-        self.weight_scale = weight_scale
-        self.bias_scale = bias_scale if bias_scale is not None else weight_scale
+        self.register_buffer("weight_scale", torch.tensor(weight_scale))
+        self.register_buffer("bias_scale", torch.tensor(bias_scale))
 
     def forward(self, input):
         q_weight = fq_round(self.weight, self.weight_scale)
@@ -99,7 +102,7 @@ class FakeQuantLinear(nn.Linear):
         return F.linear(input, q_weight, q_bias)
 
 
-class FakeQuantSparseLinear(SparseLinear):
+class FakeQuantizeSparseLinear(SparseLinear):
     """
     Sparse linear layer with fake quantization of weights and biases.
     Wraps SparseLinear and applies q_round to weights and biases during forward pass.
@@ -110,16 +113,16 @@ class FakeQuantSparseLinear(SparseLinear):
         in_features,
         out_features,
         weight_scale,
-        bias_scale=None,
+        bias_scale,
         bias=True,
         device=None,
         dtype=None,
     ):
-        super(FakeQuantSparseLinear, self).__init__(
+        super(FakeQuantizeSparseLinear, self).__init__(
             in_features, out_features, bias=bias, device=device, dtype=dtype
         )
-        self.weight_scale = weight_scale
-        self.bias_scale = bias_scale if bias_scale is not None else weight_scale
+        self.register_buffer("weight_scale", torch.tensor(weight_scale))
+        self.register_buffer("bias_scale", torch.tensor(bias_scale))
 
     def forward(self, indices, values, m, n):
         q_weight = fq_round(self.weight, self.weight_scale)

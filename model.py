@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 
-from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
+from quant import FakeQuantizeLinear, FakeQuantizeSparseLinear, fq_floor
 
 NUM_FEATURE_PARAMS = [
     6561, 6561, 6561, 6561,
@@ -46,22 +46,22 @@ class LayerStacks(nn.Module):
             self.score_scale * self.weight_scale_out
         )
 
-        self.l1_base = FakeQuantLinear(
+        self.l1_base = FakeQuantizeLinear(
             L1_BASE, (L2 // 2) * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.l1_pa = FakeQuantLinear(
+        self.l1_pa = FakeQuantizeLinear(
             L1_PA, (L2 // 2) * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.l2 = FakeQuantLinear(
+        self.l2 = FakeQuantizeLinear(
             L2 * 2, L3 * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.output = FakeQuantLinear(
+        self.output = FakeQuantizeLinear(
             L3, 1 * count,
             weight_scale=self.score_scale * self.weight_scale_out / self.quantized_one,
             bias_scale=self.score_scale * self.weight_scale_out
@@ -162,7 +162,7 @@ class PhaseAdaptiveInput(nn.Module):
         self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
-        self.input = FakeQuantSparseLinear(
+        self.input = FakeQuantizeSparseLinear(
             SUM_OF_FEATURES,
             (L1_PA - 1) * self.count,
             weight_scale=quantized_one,
@@ -196,7 +196,7 @@ class PhaseAdaptiveInput(nn.Module):
         x = F.leaky_relu(x, negative_slope=0.125)
         x = torch.clamp(x, -16 / 127, 1.0 - 16 / 127)
         x = torch.add(x, 16 / 127)
-        x = fq_floor(x, self.quantized_one)
+        x = fq_floor(x, self.quantized_one, 0.0, 1.0)
         return x
 
     def get_layers(self):
@@ -226,7 +226,7 @@ class ReversiModel(L.LightningModule):
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
 
-        self.input = FakeQuantSparseLinear(
+        self.input = FakeQuantizeSparseLinear(
             SUM_OF_FEATURES,
             LBASE,
             weight_scale=self.quantized_one,
@@ -275,10 +275,17 @@ class ReversiModel(L.LightningModule):
 
     def forward(self, feature_indices, values, m, n, mobility, ply):
         x_base = self.input(feature_indices, values, m, n)
-        x_base = torch.clamp(x_base, 0.0, 1.0)
-
         x_base_s = torch.split(x_base, LBASE // 2, dim=1)
-        x_base = x_base_s[0] * x_base_s[1] * 127 / 128
+
+        # Clipped ReLU
+        x_base_s0 = torch.clamp(x_base_s[0], 0.0, 1.0)
+        x_base_s0 = fq_floor(x_base_s0, 127)
+
+        # Hard sigmoid
+        x_base_s1 = torch.clamp(x_base_s[1] * 0.25 + 0.5, 0.0, 1.0)
+        x_base_s1 = fq_floor(x_base_s1, self.quantized_one * 2)
+
+        x_base = x_base_s0 * x_base_s1 * 127 / 128
         x_base = fq_floor(x_base, self.quantized_one)
         x_base = torch.cat([x_base, mobility * 3 / 127], dim=1)
 

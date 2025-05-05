@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
 
-from quant import FakeQuantLinear, FakeQuantSparseLinear, fq_floor
+from quant import FakeQuantizeLinear, FakeQuantizeSparseLinear, fq_floor
 
 
 NUM_FEATURE_PARAMS = [
@@ -46,17 +46,17 @@ class LayerStacks(nn.Module):
             self.score_scale * self.weight_scale_out
         )
 
-        self.l1_pa = FakeQuantLinear(
+        self.l1_pa = FakeQuantizeLinear(
             L1_PA, L2 * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.l2 = FakeQuantLinear(
+        self.l2 = FakeQuantizeLinear(
             L2, L3 * count,
             weight_scale=self.weight_scale_hidden,
             bias_scale=self.weight_scale_hidden * self.quantized_one
         )
-        self.output = FakeQuantLinear(
+        self.output = FakeQuantizeLinear(
             L3, 1 * count,
             weight_scale=self.score_scale * self.weight_scale_out / self.quantized_one,
             bias_scale=self.score_scale * self.weight_scale_out
@@ -144,7 +144,7 @@ class PhaseAdaptiveInput(nn.Module):
         self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
-        self.input = FakeQuantSparseLinear(
+        self.input = FakeQuantizeSparseLinear(
             SUM_OF_FEATURES,
             (L1_PA - 1) * self.count,
             weight_scale=quantized_one,
