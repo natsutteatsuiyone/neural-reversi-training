@@ -5,6 +5,9 @@ import zstandard as zstd
 import model as M
 from typing import List, Union
 import torch.nn as nn
+import os
+
+import version
 
 
 def ascii_hist(name: str, x: Union[List[float], np.ndarray], bins: int = 10) -> None:
@@ -42,7 +45,7 @@ class NNWriter:
             self.write_fc_layer(model, output, is_output=True)
 
     def write_input_layer(self, model: M.ReversiModel) -> None:
-        layer = model.input
+        layer = model.base_input
         bias = (
             layer.bias.detach().cpu().mul(model.quantized_one).round().to(torch.int16)
         )
@@ -97,15 +100,17 @@ class NNWriter:
             .to(torch.int8)
         )
 
-        print(
-            f"Layer has {clipped}/{total_elements} clipped weights. "
-            f"Maximum excess: {clipped_max} (limit: {kMaxWeight})."
-        )
+        if self.show_hist:
+            print(
+                f"Layer has {clipped}/{total_elements} clipped weights. "
+                f"Maximum excess: {clipped_max} (limit: {kMaxWeight})."
+            )
 
         num_input = weight.shape[1]
         if num_input % 32 != 0:
             padded_num = num_input + (32 - num_input % 32)
-            print(f"Padding input from {num_input} to {padded_num} elements.")
+            if self.show_hist:
+                print(f"Padding input from {num_input} to {padded_num} elements.")
             new_w = torch.zeros(weight.shape[0], padded_num, dtype=torch.int8)
             new_w[:, :num_input] = weight
             weight = new_w
@@ -113,11 +118,12 @@ class NNWriter:
         self.buf.extend(bias.flatten().numpy().tobytes())
         self.buf.extend(weight.flatten().numpy().tobytes())
 
-        if is_output:
-            print("Output layer parameters:")
-            print(f"Weight: {weight.flatten()}")
-            print(f"Bias: {bias.flatten()}")
-        print()
+        if self.show_hist:
+            if is_output:
+                print("Output layer parameters:")
+                print(f"Weight: {weight.flatten()}")
+                print(f"Bias: {bias.flatten()}")
+            print()
 
 
 def main() -> None:
@@ -129,9 +135,9 @@ def main() -> None:
     )
     parser.add_argument("--cl", type=int, default=7)
     parser.add_argument(
-        "--output",
+        "--output_dir",
         type=str,
-        default="eval.zst",
+        default=".",
     )
     parser.add_argument("--no-hist", action="store_true")
     args = parser.parse_args()
@@ -143,7 +149,12 @@ def main() -> None:
     cctx = zstd.ZstdCompressor(level=args.cl)
     compressed_data = cctx.compress(writer.buf)
 
-    with open(args.output, "wb") as f:
+    output_filename = f"eval-{version.get_version_hash()}.zst"
+    output_path = os.path.join(args.output_dir, output_filename)
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    with open(output_path, "wb") as f:
         f.write(compressed_data)
 
 

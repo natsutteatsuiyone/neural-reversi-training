@@ -7,7 +7,6 @@ import lightning as L
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import ModelCheckpoint
-import random
 
 import model
 import model_sm
@@ -40,12 +39,6 @@ def parse_args() -> argparse.Namespace:
         help="Number of workers for DataLoader",
     )
     parser.add_argument(
-        "--max_epochs",
-        type=int,
-        default=10000,
-        help="Maximum number of epochs",
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -66,13 +59,13 @@ def parse_args() -> argparse.Namespace:
         help="Learning rate",
     )
     parser.add_argument(
-        "--t_max", type=int, default=300, help="CosineAnnealingLR's T_max"
+        "--epochs", type=int, default=300
     )
     parser.add_argument(
-        "--random_skipping",
-        type=int,
-        default=3,
-        help="Random skipping for FeatureDataset",
+        "--file_usage_ratio",
+        type=float,
+        default=1.0,
+        help="Ratio of files to use per epoch (0.0 to 1.0)",
     )
     parser.add_argument(
         "--small",
@@ -86,30 +79,26 @@ def prepare_dataloaders(
     val_dir: str,
     batch_size: int,
     num_workers: int,
-    random_skipping: int,
+    file_usage_ratio: float,
     small: bool,
 ) -> tuple:
     train_files = [str(p) for p in Path(train_dir).glob("*.zst")]
-    random.shuffle(train_files)
     val_files = [str(p) for p in Path(val_dir).glob("*.zst")]
 
     if small:
-        train_dataset = FeatureDataset(
-            filepaths=train_files,
-            batch_size=batch_size,
-            random_skipping=random_skipping,
-            num_features=model_sm.NUM_FEATURES,
-            num_feature_params=model_sm.NUM_FEATURE_PARAMS,
-        )
+        num_features = model_sm.NUM_FEATURES
+        num_feature_params = model_sm.NUM_FEATURE_PARAMS
     else:
-        train_dataset = FeatureDataset(
-            filepaths=train_files,
-            batch_size=batch_size,
-            random_skipping=random_skipping,
-            num_features=model.NUM_FEATURES,
-            num_feature_params=model.NUM_FEATURE_PARAMS,
-        )
+        num_features = model.NUM_FEATURES
+        num_feature_params = model.NUM_FEATURE_PARAMS
 
+    train_dataset = FeatureDataset(
+        filepaths=train_files,
+        batch_size=batch_size,
+        file_usage_ratio=file_usage_ratio,
+        num_features=num_features,
+        num_feature_params=num_feature_params,
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=1,
@@ -118,22 +107,13 @@ def prepare_dataloaders(
         pin_memory=True,
     )
 
-    if small:
-        val_dataset = FeatureDataset(
-            filepaths=val_files,
-            batch_size=batch_size,
-            random_skipping=0,
-            num_features=model_sm.NUM_FEATURES,
-            num_feature_params=model_sm.NUM_FEATURE_PARAMS,
-        )
-    else:
-        val_dataset = FeatureDataset(
-            filepaths=val_files,
-            batch_size=batch_size,
-            random_skipping=0,
-            num_features=model.NUM_FEATURES,
-            num_feature_params=model.NUM_FEATURE_PARAMS,
-        )
+    val_dataset = FeatureDataset(
+        filepaths=val_files,
+        batch_size=batch_size,
+        file_usage_ratio=1.0,
+        num_features=num_features,
+        num_feature_params=num_feature_params,
+    )
     val_loader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -145,15 +125,17 @@ def prepare_dataloaders(
     return train_loader, val_loader
 
 
-def prepare_logger_and_callbacks() -> tuple:
+def prepare_logger_and_callbacks(small: bool) -> tuple:
     logger = TensorBoardLogger("tb_logs", name="reversi_model")
     lr_monitor = LearningRateMonitor(logging_interval="step")
+
+    dirpath = "ckpt/small" if small else "ckpt"
 
     epoch_checkpoint = ModelCheckpoint(
         save_top_k=30,
         monitor="val_loss",
         mode="min",
-        dirpath="ckpt/",
+        dirpath=dirpath,
         filename="{epoch}-{val_loss:.2f}",
         save_on_train_epoch_end=True,
         save_last=True,
@@ -172,35 +154,31 @@ def main():
         args.val_data,
         args.batch_size,
         args.num_workers,
-        args.random_skipping,
+        args.file_usage_ratio,
         args.small,
     )
 
     if args.small:
-        reversi_model = model_sm.ReversiSmallModel(
-            lr=args.lr,
-            t_max=args.t_max,
-        )
+        reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs)
     else:
         if args.resume_from_checkpoint:
             reversi_model = model.ReversiModel.load_from_checkpoint(
-                args.resume_from_checkpoint
+                args.resume_from_checkpoint,
             )
         elif args.resume_from_weights:
+            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.epochs)
             checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
-            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.t_max)
             reversi_model.load_state_dict(checkpoint["state_dict"])
         else:
-            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.t_max)
-    reversi_model = torch.compile(reversi_model)
+            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.epochs)
 
-    logger, callbacks = prepare_logger_and_callbacks()
+    logger, callbacks = prepare_logger_and_callbacks(args.small)
 
     trainer = L.Trainer(
         callbacks=callbacks,
         log_every_n_steps=500,
         logger=logger,
-        max_epochs=args.max_epochs,
+        max_epochs=args.epochs,
         precision="bf16-mixed",
     )
 
