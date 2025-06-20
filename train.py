@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=8192 * 4,
+        default=16384,
         help="Batch size (applied inside FeatureDataset)",
     )
     parser.add_argument(
@@ -59,8 +59,18 @@ def parse_args() -> argparse.Namespace:
         help="Learning rate",
     )
     parser.add_argument(
-        "--epochs", type=int, default=300
+        "--shuffle",
+        action="store_true",
+        default=True,
+        help="Shuffle the dataset",
     )
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-2,
+        help="Weight decay for the optimizer",
+    )
+    parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument(
         "--file_usage_ratio",
         type=float,
@@ -80,6 +90,7 @@ def prepare_dataloaders(
     batch_size: int,
     num_workers: int,
     file_usage_ratio: float,
+    shuffle: bool,
     small: bool,
 ) -> tuple:
     train_files = [str(p) for p in Path(train_dir).glob("*.zst")]
@@ -98,6 +109,7 @@ def prepare_dataloaders(
         file_usage_ratio=file_usage_ratio,
         num_features=num_features,
         num_feature_params=num_feature_params,
+        shuffle=shuffle,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -113,6 +125,7 @@ def prepare_dataloaders(
         file_usage_ratio=1.0,
         num_features=num_features,
         num_feature_params=num_feature_params,
+        shuffle=False,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -132,7 +145,7 @@ def prepare_logger_and_callbacks(small: bool) -> tuple:
     dirpath = "ckpt/small" if small else "ckpt"
 
     epoch_checkpoint = ModelCheckpoint(
-        save_top_k=30,
+        save_top_k=20,
         monitor="val_loss",
         mode="min",
         dirpath=dirpath,
@@ -155,6 +168,7 @@ def main():
         args.batch_size,
         args.num_workers,
         args.file_usage_ratio,
+        args.shuffle,
         args.small,
     )
 
@@ -162,15 +176,17 @@ def main():
         reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs)
     else:
         if args.resume_from_checkpoint:
-            reversi_model = model.ReversiModel.load_from_checkpoint(
-                args.resume_from_checkpoint,
-            )
+            reversi_model = model.ReversiModel()
         elif args.resume_from_weights:
-            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.epochs)
+            reversi_model = model.ReversiModel(
+                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            )
             checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
             reversi_model.load_state_dict(checkpoint["state_dict"])
         else:
-            reversi_model = model.ReversiModel(lr=args.lr, t_max=args.epochs)
+            reversi_model = model.ReversiModel(
+                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            )
 
     logger, callbacks = prepare_logger_and_callbacks(args.small)
 
@@ -183,8 +199,12 @@ def main():
     )
 
     torch.set_float32_matmul_precision("high")
+    reversi_model = torch.compile(reversi_model, mode="reduce-overhead")
     trainer.fit(
-        reversi_model, train_dataloaders=train_loader, val_dataloaders=val_loader
+        reversi_model,
+        train_dataloaders=train_loader,
+        val_dataloaders=val_loader,
+        ckpt_path=args.resume_from_checkpoint or None,
     )
 
 

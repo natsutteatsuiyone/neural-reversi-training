@@ -17,13 +17,13 @@ def serialize_checkpoint(args: Tuple[str, str, int]) -> Tuple[str, bool, str]:
 
     filename = os.path.basename(checkpoint_path)
     name_without_ext = os.path.splitext(filename)[0]
-    output_path = os.path.join(output_dir, f"{name_without_ext}.zst")
 
     cmd = [
         "uv", "run", "serialize.py",
         "--checkpoint", checkpoint_path,
         "--cl", str(cl),
-        "--output", output_path,
+        "--output_dir", output_dir,
+        "--filename", f"{name_without_ext}.zst",
         "--no-hist"
     ]
 
