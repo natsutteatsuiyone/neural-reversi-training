@@ -114,15 +114,15 @@ class LayerStacks(nn.Module):
         batch_size = x_base.shape[0]
         idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
         ls_indices = ply.flatten() // self.bucket_size
-        indices = ls_indices + idx_offset
+        bucket_idx = (ls_indices + idx_offset).unsqueeze(1)
 
         # Process base features
         l1x_base = self.l1_base(x_base).view(-1, self.count, L2_HALF)
-        l1x_base = torch.gather(l1x_base.view(-1, L2_HALF), 0, indices.unsqueeze(1).expand(-1, L2_HALF))
+        l1x_base = torch.gather(l1x_base.view(-1, L2_HALF), 0, bucket_idx.expand(-1, L2_HALF))
 
         # Process PA features
         l1x_pa = self.l1_pa(x_pa).view(-1, self.count, L2_HALF)
-        l1x_pa = torch.gather(l1x_pa.view(-1, L2_HALF), 0, indices.unsqueeze(1).expand(-1, L2_HALF))
+        l1x_pa = torch.gather(l1x_pa.view(-1, L2_HALF), 0, bucket_idx.expand(-1, L2_HALF))
 
         # Combine and apply activations
         l1x = torch.cat([l1x_base, l1x_pa], dim=1)
@@ -132,13 +132,13 @@ class LayerStacks(nn.Module):
 
         # Second layer
         l2x = self.l2(l1x).view(-1, self.count, L3)
-        l2x = torch.gather(l2x.view(-1, L3), 0, indices.unsqueeze(1).expand(-1, L3))
+        l2x = torch.gather(l2x.view(-1, L3), 0, bucket_idx.expand(-1, L3))
         l2x = l2x.clamp(0.0, 1.0)
         l2x = fq_floor(l2x, self.quantized_one)
 
         # Output layer
         output = self.output(l2x).view(-1, self.count, 1)
-        output = torch.gather(output.view(-1, 1), 0, indices.unsqueeze(1))
+        output = torch.gather(output.view(-1, 1), 0, bucket_idx)
         return fq_floor(output, self.score_scale)
 
     def get_coalesced_layer_stacks(self) -> Iterator[Tuple[nn.Linear, nn.Linear, nn.Linear, nn.Linear]]:
@@ -195,15 +195,15 @@ class PhaseAdaptiveInput(nn.Module):
         self,
         feature_indices: torch.Tensor,
         values: torch.Tensor,
-        m: int,
-        n: int,
+        batch_size: int,
+        in_features: int,
         ply: torch.Tensor
     ) -> torch.Tensor:
-        idx_offset = torch.arange(0, m * self.count, self.count, device=ply.device)
-        x = self.input(feature_indices, values, m, n).view(-1, self.count, LPA)
+        x = self.input(feature_indices, values, batch_size, in_features).view(-1, self.count, LPA)
 
-        bucket_idx = ply.flatten() // self.bucket_size + idx_offset
-        x = torch.gather(x.view(-1, LPA), 0, bucket_idx.unsqueeze(1).expand(-1, LPA))
+        idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
+        bucket_idx = (ply.flatten() // self.bucket_size + idx_offset).unsqueeze(1)
+        x = torch.gather(x.view(-1, LPA), 0, bucket_idx.expand(-1, LPA))
 
         # Apply activation and normalization
         x = F.leaky_relu(x, negative_slope=0.125)
@@ -284,14 +284,14 @@ class ReversiModel(L.LightningModule):
     ) -> torch.Tensor:
         # Base input processing
         x_base = self.base_input(indices, values, batch_size, in_features)
-        x_base_relu, x_base_sigmoid = torch.split(x_base, LBASE // 2, dim=1)
+        x_base1, x_base2 = torch.split(x_base, LBASE // 2, dim=1)
 
         # Apply different activations to each half
-        x_base_relu = fq_floor(x_base_relu.clamp(0.0, 1.0), 127)
-        x_base_sigmoid = fq_floor((x_base_sigmoid * 0.25 + 0.5).clamp(0.0, 1.0), self.quantized_one * 2)
+        x_base1 = fq_floor(x_base1.clamp(0.0, 1.0), 127)
+        x_base2 = fq_floor((x_base2 * 0.25 + 0.5).clamp(0.0, 1.0), self.quantized_one * 2)
 
-        # Combine with gating mechanism
-        x_base = fq_floor(x_base_relu * x_base_sigmoid * 127 / 128, self.quantized_one)
+        # Combine 
+        x_base = fq_floor(x_base1 * x_base2 * 127 / 128, self.quantized_one)
 
         # Phase-adaptive input
         x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
@@ -316,9 +316,10 @@ class ReversiModel(L.LightningModule):
         batch_size = feature_indices.size(0)
 
         # Create sparse representation
-        batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
-        sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
-        sparse_values = torch.ones(sparse_indices.size(1), device=device)
+        with torch.no_grad():
+            batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
+            sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
+            sparse_values = torch.ones(sparse_indices.size(1), device=device)
 
         score_pred = self(sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply)
         loss = F.mse_loss(score_pred, score_target)
@@ -348,6 +349,8 @@ class ReversiModel(L.LightningModule):
                 decay_params.append(param)
 
         # Try to use Apex FusedAdam if available, otherwise use PyTorch AdamW
+        betas = (0.95, 0.999)
+        eps = 1e-4
         try:
             import apex
             optimizer = apex.optimizers.FusedAdam(
@@ -356,8 +359,8 @@ class ReversiModel(L.LightningModule):
                     {"params": no_decay_params, "weight_decay": 0.0},
                 ],
                 lr=self.hparams.lr,
-                betas=(0.95, 0.999),
-                eps=1e-6,
+                betas=betas,
+                eps=eps,
             )
         except ImportError:
             optimizer = torch.optim.AdamW(
@@ -366,8 +369,8 @@ class ReversiModel(L.LightningModule):
                     {"params": no_decay_params, "weight_decay": 0.0},
                 ],
                 lr=self.hparams.lr,
-                betas=(0.95, 0.999),
-                eps=1e-6,
+                betas=betas,
+                eps=eps,
                 fused=True,
             )
 

@@ -29,7 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=16384,
+        default=65536,
         help="Batch size (applied inside FeatureDataset)",
     )
     parser.add_argument(
@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
         default=1e-2,
         help="Weight decay for the optimizer",
     )
-    parser.add_argument("--epochs", type=int, default=300)
+    parser.add_argument("--epochs", type=int, default=400)
     parser.add_argument(
         "--file_usage_ratio",
         type=float,
@@ -149,7 +149,7 @@ def prepare_logger_and_callbacks(small: bool) -> tuple:
         monitor="val_loss",
         mode="min",
         dirpath=dirpath,
-        filename="{epoch}-{val_loss:.2f}",
+        filename="{epoch}-{val_loss:.4f}",
         save_on_train_epoch_end=True,
         save_last=True,
     )
@@ -192,7 +192,7 @@ def main():
 
     trainer = L.Trainer(
         callbacks=callbacks,
-        log_every_n_steps=500,
+        log_every_n_steps=2000,
         logger=logger,
         max_epochs=args.epochs,
         precision="bf16-mixed",

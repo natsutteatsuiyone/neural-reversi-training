@@ -71,17 +71,17 @@ class FeatureDataset(IterableDataset):
     def _feature_iterator(self, paths: List[str]):
         record_size = self.record_dtype.itemsize
         dctx = zstandard.ZstdDecompressor()
-        chunk_bytes = record_size * self.batch_size * 20  # Larger chunk size
+        chunk_bytes = record_size * self.batch_size * 10  # Larger chunk size
 
         # Pre-allocate larger buffers
-        buffer = bytearray(chunk_bytes * 4)
+        buffer = bytearray(chunk_bytes)
         buffer_view = memoryview(buffer)
         buffer_len = 0
         batch_buf = np.empty((self.batch_size * 4,), dtype=self.record_dtype)
         batch_buf_len = 0
 
         for path in paths:
-            with open(path, "rb") as fp, dctx.stream_reader(fp, read_size=262144) as reader:
+            with open(path, "rb") as fp, dctx.stream_reader(fp) as reader:
                 while True:
                     chunk = reader.read(chunk_bytes)
                     if not chunk:

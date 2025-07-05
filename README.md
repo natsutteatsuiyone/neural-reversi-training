@@ -19,8 +19,8 @@ cd neural-reversi-training
 
 ```bash
 uv venv
-uv pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 uv sync
+uv pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
 ```
 
 ### 3. Optional: NVIDIA Apex (Recommended for Performance)
@@ -31,7 +31,9 @@ For optimal training performance, install NVIDIA Apex:
 # Install NVIDIA Apex for optimized training
 uv pip install -v --no-deps --no-cache-dir --disable-pip-version-check --no-build-isolation \
     git+https://github.com/NVIDIA/apex.git@master \
-    --config-settings "--build-option=--cpp_ext --build-option=--cuda_ext"
+    --config-settings " \
+    --build-option=--cpp_ext \
+    --cuda_ext"
 ```
 
 ## Training
