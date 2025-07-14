@@ -8,11 +8,11 @@ from quant import FakeQuantizeLinear, FakeQuantizeSparseLinear, fq_floor
 
 NUM_FEATURE_PARAMS = [
     6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
     6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    19683, 19683, 19683, 19683,
 ]
 
 NUM_FEATURES = len(NUM_FEATURE_PARAMS)
@@ -288,7 +288,7 @@ class ReversiModel(L.LightningModule):
 
         # Apply different activations to each half
         x_base1 = fq_floor(x_base1.clamp(0.0, 1.0), 127)
-        x_base2 = fq_floor((x_base2 * 0.25 + 0.5).clamp(0.0, 1.0), self.quantized_one * 2)
+        x_base2 = fq_floor(x_base2.clamp(0.0, 1.0), 127)
 
         # Combine 
         x_base = fq_floor(x_base1 * x_base2 * 127 / 128, self.quantized_one)

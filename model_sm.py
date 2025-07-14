@@ -1,19 +1,19 @@
-from typing import List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as L
+from typing import Tuple, List, Iterator
 
 from quant import FakeQuantizeLinear, FakeQuantizeSparseLinear, fq_floor
 
 
 NUM_FEATURE_PARAMS = [
     6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
     6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    6561, 6561, 6561, 6561,
+    19683, 19683, 19683, 19683,
 ]
 
 
@@ -31,9 +31,14 @@ MAX_PLY = 60
 
 class LayerStacks(nn.Module):
     def __init__(
-        self, count, quantized_one, weight_scale_hidden, weight_scale_out, score_scale
+        self,
+        count: int,
+        quantized_one: float,
+        weight_scale_hidden: float,
+        weight_scale_out: float,
+        score_scale: float,
     ):
-        super(LayerStacks, self).__init__()
+        super().__init__()
         self.count = count
         self.bucket_size = MAX_PLY // count
 
@@ -51,28 +56,25 @@ class LayerStacks(nn.Module):
             L1_PA,
             L2 * count,
             weight_scale=self.weight_scale_hidden,
-            bias_scale=self.weight_scale_hidden * self.quantized_one
+            bias_scale=self.weight_scale_hidden * self.quantized_one,
         )
         self.l2 = FakeQuantizeLinear(
             L2,
             L3 * count,
             weight_scale=self.weight_scale_hidden,
-            bias_scale=self.weight_scale_hidden * self.quantized_one
+            bias_scale=self.weight_scale_hidden * self.quantized_one,
         )
         self.output = FakeQuantizeLinear(
             L3,
             1 * count,
             weight_scale=self.score_scale * self.weight_scale_out / self.quantized_one,
-            bias_scale=self.score_scale * self.weight_scale_out
+            bias_scale=self.score_scale * self.weight_scale_out,
         )
-
-        # Cached helper tensor for choosing outputs by bucket indices.
-        # Initialized lazily in forward.
-        self.idx_offset = None
 
         self._init_layers()
 
-    def _init_layers(self):
+    def _init_layers(self) -> None:
+        """Initialize layers to ensure all layer stacks are initialized identically."""
         l1_pa_weight = self.l1_pa.weight
         l1_pa_bias = self.l1_pa.bias
         l2_weight = self.l2.weight
@@ -84,64 +86,66 @@ class LayerStacks(nn.Module):
             output_bias.fill_(0.0)
 
             for i in range(1, self.count):
-                # Force all layer stacks to be initialized in the same way.
-                l1_pa_weight[i * L2 : (i + 1) * L2, :] = l1_pa_weight[ 0 : L2, :]
-                l1_pa_bias[i * L2 : (i + 1) * L2] = l1_pa_bias[0 : L2]
-                l2_weight[i * L3 : (i + 1) * L3, :] = l2_weight[0:L3, :]
-                l2_bias[i * L3 : (i + 1) * L3] = l2_bias[0:L3]
-                output_weight[i : i + 1, :] = output_weight[0:1, :]
+                start, end = i * L2, (i + 1) * L2
+                l1_pa_weight[start:end] = l1_pa_weight[:L2]
+                l1_pa_bias[start:end] = l1_pa_bias[:L2]
 
-        self.l1_pa.weight = nn.Parameter(l1_pa_weight)
-        self.l1_pa.bias = nn.Parameter(l1_pa_bias)
-        self.l2.weight = nn.Parameter(l2_weight)
-        self.l2.bias = nn.Parameter(l2_bias)
-        self.output.weight = nn.Parameter(output_weight)
-        self.output.bias = nn.Parameter(output_bias)
+                start, end = i * L3, (i + 1) * L3
+                l2_weight[start:end] = l2_weight[:L3]
+                l2_bias[start:end] = l2_bias[:L3]
 
-    def forward(self, x_pa, ply):
-        if self.idx_offset is None or self.idx_offset.shape[0] != x_pa.shape[0]:
-            self.idx_offset = torch.arange( 0, x_pa.shape[0] * self.count, self.count, device=ply.device )
+                output_weight[i:i+1] = output_weight[:1]
 
+    def forward(self, x_pa: torch.Tensor, ply: torch.Tensor) -> torch.Tensor:
+        batch_size = x_pa.shape[0]
+        idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
         ls_indices = ply.flatten() // self.bucket_size
-        indices = ls_indices + self.idx_offset
+        bucket_idx = (ls_indices + idx_offset).unsqueeze(1)
 
-        l1x = self.l1_pa(x_pa).reshape((-1, self.count, L2))
-        l1x = l1x.view(-1, L2)[indices]
-
-        l1x = torch.clamp(l1x, 0.0, 1.0)
+        # Process PA features
+        l1x = self.l1_pa(x_pa).view(-1, self.count, L2)
+        l1x = torch.gather(l1x.view(-1, L2), 0, bucket_idx.expand(-1, L2))
+        l1x = l1x.clamp(0.0, 1.0)
         l1x = fq_floor(l1x, self.quantized_one)
 
-        l2s = self.l2(l1x).reshape((-1, self.count, L3))
-        l2c = l2s.view(-1, L3)[indices]
-        l2x = torch.clamp(l2c, 0.0, 1.0)
+        # Second layer
+        l2x = self.l2(l1x).view(-1, self.count, L3)
+        l2x = torch.gather(l2x.view(-1, L3), 0, bucket_idx.expand(-1, L3))
+        l2x = l2x.clamp(0.0, 1.0)
         l2x = fq_floor(l2x, self.quantized_one)
 
-        l3s = self.output(l2x).reshape((-1, self.count, 1))
-        l3x = l3s.view(-1, 1)[indices]
-        score_pred = fq_floor(l3x, self.score_scale)
+        # Output layer
+        output = self.output(l2x).view(-1, self.count, 1)
+        output = torch.gather(output.view(-1, 1), 0, bucket_idx)
+        return fq_floor(output, self.score_scale)
 
-        return score_pred
-
-    def get_coalesced_layer_stacks(self):
+    def get_coalesced_layer_stacks(self) -> Iterator[Tuple[nn.Linear, nn.Linear, nn.Linear]]:
+        """Extract individual layer stacks as separate nn.Linear modules."""
         for i in range(self.count):
             with torch.no_grad():
                 l1_pa = nn.Linear(L1_PA, L2)
-                l2 = nn.Linear(L2 * 2, L3)
+                l2 = nn.Linear(L2, L3)
                 output = nn.Linear(L3, 1)
 
-                l1_pa.weight.data = self.l1_pa.weight[i * L2 : (i + 1) * L2, :]
-                l1_pa.bias.data = self.l1_pa.bias[i * L2 : (i + 1) * L2]
-                l2.weight.data = self.l2.weight[i * L3 : (i + 1) * L3, :]
-                l2.bias.data = self.l2.bias[i * L3 : (i + 1) * L3]
-                output.weight.data = self.output.weight[i : (i + 1), :]
-                output.bias.data = self.output.bias[i : (i + 1)]
+                # Extract weights and biases for this stack
+                start_l2 = i * L2
+                end_l2 = (i + 1) * L2
+                start_l3 = i * L3
+                end_l3 = (i + 1) * L3
+
+                l1_pa.weight.data = self.l1_pa.weight[start_l2:end_l2]
+                l1_pa.bias.data = self.l1_pa.bias[start_l2:end_l2]
+                l2.weight.data = self.l2.weight[start_l3:end_l3]
+                l2.bias.data = self.l2.bias[start_l3:end_l3]
+                output.weight.data = self.output.weight[i:i+1]
+                output.bias.data = self.output.bias[i:i+1]
 
                 yield l1_pa, l2, output
 
 
 class PhaseAdaptiveInput(nn.Module):
-    def __init__(self, count, quantized_one):
-        super(PhaseAdaptiveInput, self).__init__()
+    def __init__(self, count: int, quantized_one: float):
+        super().__init__()
         self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
@@ -150,64 +154,78 @@ class PhaseAdaptiveInput(nn.Module):
             SUM_OF_FEATURES,
             LPA * self.count,
             weight_scale=quantized_one,
-            bias_scale=quantized_one
+            bias_scale=quantized_one,
         )
-        self.idx_offset = None
         self._init_layers()
 
-    def _init_layers(self):
-        li_weight = self.input.weight
-        li_bias = self.input.bias
+    def _init_layers(self) -> None:
+        """Initialize layers to ensure all phase-adaptive buckets are initialized identically."""
         with torch.no_grad():
             for i in range(1, self.count):
-                li_weight[:, i * LPA : (i + 1) * LPA] = li_weight[:, 0:LPA]
-                li_bias[i * LPA : (i + 1) * LPA] = li_bias[0:LPA]
+                start, end = i * LPA, (i + 1) * LPA
+                self.input.weight[:, start:end] = self.input.weight[:, :LPA]
+                self.input.bias[start:end] = self.input.bias[:LPA]
 
-        self.input.weight = nn.Parameter(li_weight)
-        self.input.bias = nn.Parameter(li_bias)
+    def forward(
+        self,
+        feature_indices: torch.Tensor,
+        values: torch.Tensor,
+        batch_size: int,
+        in_features: int,
+        ply: torch.Tensor
+    ) -> torch.Tensor:
+        x = self.input(feature_indices, values, batch_size, in_features).view(-1, self.count, LPA)
 
-    def forward(self, feature_indices, values, m, n, ply):
-        if self.idx_offset is None or self.idx_offset.shape[0] != m:
-            self.idx_offset = torch.arange(
-                0, m * self.count, self.count, device=ply.device
-            )
-        x = self.input(feature_indices, values, m, n).reshape((-1, self.count, LPA))
+        idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
+        
+        # Custom bucket mapping: ply < 30 = 0, 30 <= ply < 36 = 1, 36 <= ply < 42 = 2, ...
+        ply_flat = ply.flatten()
+        bucket_indices = torch.zeros_like(ply_flat, dtype=torch.long)
+        bucket_indices = torch.where(ply_flat < 30, 0, bucket_indices)
+        bucket_indices = torch.where((ply_flat >= 30) & (ply_flat < 36), 1, bucket_indices)
+        bucket_indices = torch.where((ply_flat >= 36) & (ply_flat < 42), 2, bucket_indices)
+        bucket_indices = torch.where((ply_flat >= 42) & (ply_flat < 48), 3, bucket_indices)
+        bucket_indices = torch.where((ply_flat >= 48) & (ply_flat < 54), 4, bucket_indices)
+        bucket_indices = torch.where(ply_flat >= 54, 5, bucket_indices)
+        
+        bucket_idx = (bucket_indices + idx_offset).unsqueeze(1)
+        x = torch.gather(x.view(-1, LPA), 0, bucket_idx.expand(-1, LPA))
 
-        bucket_idx = ply.flatten() // self.bucket_size + self.idx_offset
-        x = x.view(-1, LPA)[bucket_idx]
-
+        # Apply activation and normalization
         x = F.leaky_relu(x, negative_slope=0.125)
-        x = torch.clamp(x, -16 / 127, 1.0 - 16 / 127)
-        x = torch.add(x, 16 / 127)
-        x = fq_floor(x, self.quantized_one, 0.0, 1.0)
-        return x
+        x = x.clamp(-16/127, 1.0 - 16/127) + 16/127
+        return fq_floor(x, self.quantized_one, 0.0, 1.0)
 
-    def get_layers(self):
+    def get_layers(self) -> Iterator[nn.Linear]:
+        """Extract individual phase-adaptive layers as separate nn.Linear modules."""
         for i in range(self.count):
             with torch.no_grad():
-                li = nn.Linear(SUM_OF_FEATURES, LPA)
-                li.weight.data = self.input.weight[:, i * LPA : (i + 1) * LPA]
-                li.bias.data = self.input.bias[i * LPA : (i + 1) * LPA]
-                yield li
+                layer = nn.Linear(SUM_OF_FEATURES, LPA)
+                start, end = i * LPA, (i + 1) * LPA
+                layer.weight.data = self.input.weight[:, start:end]
+                layer.bias.data = self.input.bias[start:end]
+                yield layer
 
 
 class ReversiSmallModel(L.LightningModule):
     def __init__(
         self,
         lr: float = 0.001,
+        weight_decay: float = 1e-2,
         t_max: int = 100,
-        eta_min: float = 1e-9,
+        eta_min: float = 1e-10,
     ):
-        super(ReversiSmallModel, self).__init__()
+        super().__init__()
         self.save_hyperparameters()
 
-        # Quantisation constants
+        # Quantization constants
         self.score_scale = 128.0
         self.weight_scale_hidden = 64.0
         self.weight_scale_out = 16.0
         self.quantized_one = 127.0
 
         self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
+        
         self.layer_stacks = LayerStacks(
             NUM_LS_BUCKETS,
             self.quantized_one,
@@ -216,33 +234,17 @@ class ReversiSmallModel(L.LightningModule):
             self.score_scale,
         )
 
-        # compile
-        self.pa_input = torch.compile(self.pa_input)
-        self.layer_stacks = torch.compile(self.layer_stacks)
-
+        # Weight clipping configuration
         max_hidden_weight = self.quantized_one / self.weight_scale_hidden
-        max_out_weight = (self.quantized_one * self.quantized_one) / (
-            self.score_scale * self.weight_scale_out
-        )
+        max_out_weight = (self.quantized_one ** 2) / (self.score_scale * self.weight_scale_out)
+
         self.weight_clipping = [
-            {
-                "params": [self.layer_stacks.l1_pa.weight],
-                "min_weight": -max_hidden_weight,
-                "max_weight": max_hidden_weight,
-            },
-            {
-                "params": [self.layer_stacks.l2.weight],
-                "min_weight": -max_hidden_weight,
-                "max_weight": max_hidden_weight,
-            },
-            {
-                "params": [self.layer_stacks.output.weight],
-                "min_weight": -max_out_weight,
-                "max_weight": max_out_weight,
-            },
+            {"params": [self.layer_stacks.l1_pa.weight], "min_weight": -max_hidden_weight, "max_weight": max_hidden_weight},
+            {"params": [self.layer_stacks.l2.weight], "min_weight": -max_hidden_weight, "max_weight": max_hidden_weight},
+            {"params": [self.layer_stacks.output.weight], "min_weight": -max_out_weight, "max_weight": max_out_weight},
         ]
 
-    def _clip_weights(self):
+    def _clip_weights(self) -> None:
         with torch.no_grad():
             for group in self.weight_clipping:
                 for param in group["params"]:
@@ -257,64 +259,85 @@ class ReversiSmallModel(L.LightningModule):
         in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
+        # Phase-adaptive input
         x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
-        x_pa = torch.cat([x_pa, mobility * 3 / 127], dim=1)
+        
+        # Add mobility features
+        mobility_scaled = mobility * 3 / 127
+        x_pa = torch.cat([x_pa, mobility_scaled], dim=1)
 
         return self.layer_stacks(x_pa, ply)
 
-    def _step(self, batch, batch_idx, loss_type):
+    def _step(
+        self,
+        batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
+        batch_idx: int,
+        loss_type: str,
+    ) -> torch.Tensor:
         self._clip_weights()
 
         score_target, feature_indices, mobility, ply = batch
         device = feature_indices.device
         batch_size = feature_indices.size(0)
 
-        batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
-        sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
-        sparse_values = torch.ones(sparse_indices.size(1), device=device)
+        # Create sparse representation
+        with torch.no_grad():
+            batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
+            sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
+            sparse_values = torch.ones(sparse_indices.size(1), device=device)
 
-        score_pred = self(
-            sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply
-        )
-
+        score_pred = self(sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply)
         loss = F.mse_loss(score_pred, score_target)
         self.log(loss_type, loss)
         return loss
 
-    def training_step(self, batch, batch_idx):
+    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
         return self._step(batch, batch_idx, "train_loss")
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx: int) -> None:
         self._step(batch, batch_idx, "val_loss")
 
-    def test_step(self, batch, batch_idx):
+    def test_step(self, batch, batch_idx: int) -> None:
         self._step(batch, batch_idx, "test_loss")
 
-    def configure_optimizers(
-        self,
-    ) -> Tuple[
-        List[torch.optim.Optimizer], List[torch.optim.lr_scheduler._LRScheduler]
-    ]:
+    def configure_optimizers(self) -> Tuple[List[torch.optim.Optimizer], List[torch.optim.lr_scheduler.LRScheduler]]:
+        # Separate parameters for weight decay
         decay_params = []
         no_decay_params = []
 
         for name, param in self.named_parameters():
             if not param.requires_grad:
                 continue
-
             if name.endswith(".bias") or param.dim() == 1:
                 no_decay_params.append(param)
             else:
                 decay_params.append(param)
 
-        optimizer = torch.optim.AdamW(
-            [
-                {"params": decay_params, "weight_decay": 1e-2},
-                {"params": no_decay_params, "weight_decay": 0.0},
-            ],
-            lr=self.hparams.lr,
-            betas=(0.95, 0.999),
-        )
+        # Try to use Apex FusedAdam if available, otherwise use PyTorch AdamW
+        betas = (0.95, 0.999)
+        eps = 1e-4
+        try:
+            import apex
+            optimizer = apex.optimizers.FusedAdam(
+                [
+                    {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+                    {"params": no_decay_params, "weight_decay": 0.0},
+                ],
+                lr=self.hparams.lr,
+                betas=betas,
+                eps=eps,
+            )
+        except ImportError:
+            optimizer = torch.optim.AdamW(
+                [
+                    {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+                    {"params": no_decay_params, "weight_decay": 0.0},
+                ],
+                lr=self.hparams.lr,
+                betas=betas,
+                eps=eps,
+                fused=True,
+            )
 
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,

@@ -156,7 +156,6 @@ def prepare_logger_and_callbacks(small: bool) -> tuple:
 
     return logger, [epoch_checkpoint, lr_monitor]
 
-
 def main():
     args = parse_args()
 
@@ -173,15 +172,17 @@ def main():
     )
 
     if args.small:
-        reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs)
+        reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
     else:
         if args.resume_from_checkpoint:
-            reversi_model = model.ReversiModel()
+            reversi_model = model.ReversiModel(
+                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            )
         elif args.resume_from_weights:
             reversi_model = model.ReversiModel(
                 lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
             )
-            checkpoint = torch.load(f=args.resume_from_weights, weights_only=True)
+            checkpoint = torch.load(args.resume_from_weights, weights_only=True)
             reversi_model.load_state_dict(checkpoint["state_dict"])
         else:
             reversi_model = model.ReversiModel(
@@ -194,8 +195,10 @@ def main():
         callbacks=callbacks,
         log_every_n_steps=2000,
         logger=logger,
-        max_epochs=args.epochs,
+        max_epochs=args.epochs + 1,
         precision="bf16-mixed",
+        gradient_clip_val=15.0,
+        gradient_clip_algorithm="norm",
     )
 
     torch.set_float32_matmul_precision("high")
@@ -206,7 +209,6 @@ def main():
         val_dataloaders=val_loader,
         ckpt_path=args.resume_from_checkpoint or None,
     )
-
 
 if __name__ == "__main__":
     main()
