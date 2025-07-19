@@ -23,3 +23,15 @@ ckpt/
 
 # VSCode settings
 .vscode/
+
+# Ignore AI/LLM instruction files
+/.claude/
+/.cursorrules
+/.cursor/
+/.goosehints
+/.windsurfrules
+/.github/copilot-instructions.md
+/AGENT.md
+/CLAUDE.md
+/GEMINI.md
+/llms.txt
