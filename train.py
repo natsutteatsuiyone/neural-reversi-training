@@ -172,7 +172,12 @@ def main():
     )
 
     if args.small:
-        reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
+        if args.resume_from_weights:
+            reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
+            checkpoint = torch.load(args.resume_from_weights, weights_only=True)
+            reversi_model.load_state_dict(checkpoint["state_dict"])
+        else:
+            reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
     else:
         if args.resume_from_checkpoint:
             reversi_model = model.ReversiModel(
@@ -197,8 +202,6 @@ def main():
         logger=logger,
         max_epochs=args.epochs + 1,
         precision="bf16-mixed",
-        gradient_clip_val=15.0,
-        gradient_clip_algorithm="norm",
     )
 
     torch.set_float32_matmul_precision("high")

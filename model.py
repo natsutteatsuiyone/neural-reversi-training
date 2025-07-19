@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import lightning as L
 from typing import Tuple, List, Iterator
 
-from quant import FakeQuantizeLinear, FakeQuantizeSparseLinear, fq_floor
+from sparse_linear import SparseLinear
 
 NUM_FEATURE_PARAMS = [
     6561, 6561, 6561, 6561,
@@ -36,48 +36,26 @@ class LayerStacks(nn.Module):
     def __init__(
         self,
         count: int,
-        quantized_one: float,
-        weight_scale_hidden: float,
-        weight_scale_out: float,
-        score_scale: float,
     ):
         super().__init__()
         self.count = count
         self.bucket_size = MAX_PLY // count
 
-        self.quantized_one = quantized_one
-        self.weight_scale_hidden = weight_scale_hidden
-        self.weight_scale_out = weight_scale_out
-        self.score_scale = score_scale
-
-        self.max_hidden_weight = self.quantized_one / self.weight_scale_hidden
-        self.max_out_weight = (self.quantized_one * self.quantized_one) / (
-            self.score_scale * self.weight_scale_out
-        )
-
-        self.l1_base = FakeQuantizeLinear(
+        self.l1_base = nn.Linear(
             L1_BASE,
             L2_HALF * count,
-            weight_scale=self.weight_scale_hidden,
-            bias_scale=self.weight_scale_hidden * self.quantized_one,
         )
-        self.l1_pa = FakeQuantizeLinear(
+        self.l1_pa = nn.Linear(
             L1_PA,
             L2_HALF * count,
-            weight_scale=self.weight_scale_hidden,
-            bias_scale=self.weight_scale_hidden * self.quantized_one,
         )
-        self.l2 = FakeQuantizeLinear(
+        self.l2 = nn.Linear(
             L2 * 2,
             L3 * count,
-            weight_scale=self.weight_scale_hidden,
-            bias_scale=self.weight_scale_hidden * self.quantized_one,
         )
-        self.output = FakeQuantizeLinear(
+        self.output = nn.Linear(
             L3,
             1 * count,
-            weight_scale=self.score_scale * self.weight_scale_out / self.quantized_one,
-            bias_scale=self.score_scale * self.weight_scale_out,
         )
 
         self._init_layers()
@@ -128,18 +106,16 @@ class LayerStacks(nn.Module):
         l1x = torch.cat([l1x_base, l1x_pa], dim=1)
         l1x_squared = l1x.pow(2) * (127 / 128)
         l1x = torch.cat([l1x_squared, l1x], dim=1).clamp(0.0, 1.0)
-        l1x = fq_floor(l1x, self.quantized_one)
 
         # Second layer
         l2x = self.l2(l1x).view(-1, self.count, L3)
         l2x = torch.gather(l2x.view(-1, L3), 0, bucket_idx.expand(-1, L3))
         l2x = l2x.clamp(0.0, 1.0)
-        l2x = fq_floor(l2x, self.quantized_one)
 
         # Output layer
         output = self.output(l2x).view(-1, self.count, 1)
         output = torch.gather(output.view(-1, 1), 0, bucket_idx)
-        return fq_floor(output, self.score_scale)
+        return output
 
     def get_coalesced_layer_stacks(self) -> Iterator[Tuple[nn.Linear, nn.Linear, nn.Linear, nn.Linear]]:
         """Extract individual layer stacks as separate nn.Linear modules."""
@@ -169,17 +145,14 @@ class LayerStacks(nn.Module):
 
 
 class PhaseAdaptiveInput(nn.Module):
-    def __init__(self, count: int, quantized_one: float):
+    def __init__(self, count: int):
         super().__init__()
-        self.quantized_one = quantized_one
         self.count = count
         self.bucket_size = MAX_PLY // self.count
 
-        self.input = FakeQuantizeSparseLinear(
+        self.input = SparseLinear(
             SUM_OF_FEATURES,
             LPA * self.count,
-            weight_scale=quantized_one,
-            bias_scale=quantized_one,
         )
         self._init_layers()
 
@@ -208,7 +181,7 @@ class PhaseAdaptiveInput(nn.Module):
         # Apply activation and normalization
         x = F.leaky_relu(x, negative_slope=0.125)
         x = x.clamp(-16/127, 1.0 - 16/127) + 16/127
-        return fq_floor(x, self.quantized_one, 0.0, 1.0)
+        return x
 
     def get_layers(self) -> Iterator[nn.Linear]:
         """Extract individual phase-adaptive layers as separate nn.Linear modules."""
@@ -227,7 +200,7 @@ class ReversiModel(L.LightningModule):
         lr: float = 0.001,
         weight_decay: float = 1e-2,
         t_max: int = 100,
-        eta_min: float = 1e-10,
+        eta_min: float = 1e-9,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -239,22 +212,14 @@ class ReversiModel(L.LightningModule):
         self.quantized_one = 127.0
 
         # Networks
-        self.base_input = FakeQuantizeSparseLinear(
+        self.base_input = SparseLinear(
             SUM_OF_FEATURES,
             LBASE,
-            weight_scale=self.quantized_one,
-            bias_scale=self.quantized_one,
         )
 
         self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
 
-        self.layer_stacks = LayerStacks(
-            NUM_LS_BUCKETS,
-            self.quantized_one,
-            self.weight_scale_hidden,
-            self.weight_scale_out,
-            self.score_scale,
-        )
+        self.layer_stacks = LayerStacks(NUM_LS_BUCKETS)
 
         # Weight clipping configuration
         max_hidden_weight = self.quantized_one / self.weight_scale_hidden
@@ -287,11 +252,11 @@ class ReversiModel(L.LightningModule):
         x_base1, x_base2 = torch.split(x_base, LBASE // 2, dim=1)
 
         # Apply different activations to each half
-        x_base1 = fq_floor(x_base1.clamp(0.0, 1.0), 127)
-        x_base2 = fq_floor(x_base2.clamp(0.0, 1.0), 127)
+        x_base1 = x_base1.clamp(0.0, 1.0)
+        x_base2 = x_base2.clamp(0.0, 1.0)
 
         # Combine 
-        x_base = fq_floor(x_base1 * x_base2 * 127 / 128, self.quantized_one)
+        x_base = x_base1 * x_base2 * 127 / 128
 
         # Phase-adaptive input
         x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
