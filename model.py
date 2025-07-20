@@ -217,7 +217,7 @@ class ReversiModel(L.LightningModule):
             LBASE,
         )
 
-        self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS, self.quantized_one)
+        self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS)
 
         self.layer_stacks = LayerStacks(NUM_LS_BUCKETS)
 
