@@ -1,64 +1,96 @@
-import pandas as pd
-import numpy as np
+"""
+Train ProbCut endgame parameters.
+"""
 
-from sklearn.linear_model import LinearRegression
+from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+from typing import Tuple
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description="Train ProbCut models from CSV data")
-parser.add_argument("csv_path", type=str, help="Path to the input CSV file")
-args = parser.parse_args()
+import pandas as pd
+from sklearn.linear_model import LinearRegression
 
-df = pd.read_csv(args.csv_path)
+import probcut_common
 
-models = {}
-epsilon = 1e-8
+build_features = probcut_common.build_features
+oof_predictions_linreg = probcut_common.oof_predictions_linreg
+smoothed_local_mae = probcut_common.smoothed_local_mae
+fit_probcut_models = probcut_common.fit_probcut_models
+format_float = probcut_common.format_float
+load_dataframe = probcut_common.load_dataframe
 
-X_train = df[["shallow_depth", "deep_depth"]].values
-y_train = df["diff"].values
+REQUIRED_COLUMNS = {"shallow_depth", "deep_depth", "diff"}
 
-# ===== Model 1: Predicting mean error (diff) =====
-mean_model = LinearRegression()
-mean_model.fit(X_train, y_train)
 
-# Prediction and residual calculation for training data
-y_train_pred = mean_model.predict(X_train)
-residuals_train = y_train - y_train_pred
+def fit_models(
+    df: pd.DataFrame,
+    n_splits: int,
+    alpha: float,
+    seed: int,
+    epsilon: float,
+) -> Tuple[LinearRegression, LinearRegression]:
+    return fit_probcut_models(
+        df,
+        n_splits=n_splits,
+        alpha=alpha,
+        seed=seed,
+        epsilon=epsilon,
+    )
 
-# ===== Calculation of local mean absolute residuals (training data) =====
-avg_abs_residuals_train = []
-X_train_df = pd.DataFrame(X_train, columns=["shallow_depth", "deep_depth"])
 
-for i in range(len(X_train)):
-    current_shallow_depth = X_train[i, 0]
-    current_deep_depth = X_train[i, 1]
+def emit_rust_params(mean_model: LinearRegression, std_model: LinearRegression) -> None:
+    # Match build_features ordering: [sd, dd, 1 / (1 + log1p(max(dd - sd, 0))), ((dd - sd) % 2 == 0)]
+    print("const PROBCUT_ENDGAME_PARAMS: ProbcutParams = ProbcutParams {")
+    print(f"    mean_intercept: {format_float(mean_model.intercept_)},")
+    print(f"    mean_coef_shallow: {format_float(mean_model.coef_[0])},")
+    print(f"    mean_coef_deep: {format_float(mean_model.coef_[1])},")
+    print(f"    std_intercept: {format_float(std_model.intercept_)},")
+    print(f"    std_coef_shallow: {format_float(std_model.coef_[0])},")
+    print(f"    std_coef_deep: {format_float(std_model.coef_[1])},")
+    print("};")
 
-    # Find indices of all points with the same shallow_depth and deep_depth
-    neighbor_indices = X_train_df[
-        (X_train_df["shallow_depth"] == current_shallow_depth)
-        & (X_train_df["deep_depth"] == current_deep_depth)
-    ].index.tolist()
 
-    # Calculate average absolute residuals for these neighbors
-    avg_abs_residual = np.mean(np.abs(residuals_train[neighbor_indices]))
-    avg_abs_residuals_train.append(avg_abs_residual)
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train ProbCut endgame model from CSV data.")
+    parser.add_argument("csv_path", type=str, help="Path to the input CSV file.")
+    probcut_common.add_training_cli_arguments(parser)
+    return parser.parse_args(argv)
 
-avg_abs_residuals_train = np.array(avg_abs_residuals_train)
 
-# For normal distribution, E(|ε|) = σ√(2/π), so σ = (mean absolute residual)*√(π/2)
-std_targets_train = avg_abs_residuals_train * np.sqrt(np.pi / 2)
-log_std_targets_train = np.log(std_targets_train + epsilon)
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    csv_path = Path(args.csv_path)
+    try:
+        df = load_dataframe(csv_path, REQUIRED_COLUMNS)
+    except FileNotFoundError:
+        print(f"Error: File {csv_path} does not exist.", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error loading/validating data: {exc}", file=sys.stderr)
+        return 1
 
-# ===== Model 2: Predicting log standard deviation =====
-std_model = LinearRegression()
-std_model.fit(X_train, log_std_targets_train)
+    n_splits = max(2, args.folds)
+    alpha = max(0.0, args.alpha)
+    epsilon = args.epsilon
+    seed = args.seed
 
-print("    ProbcutParams {")
-print(f"        mean_intercept: {mean_model.intercept_:.10},")
-print(f"        mean_coef_shallow: {mean_model.coef_[0]:.10},")
-print(f"        mean_coef_deep: {mean_model.coef_[1]:.10},")
-print(f"        std_intercept: {std_model.intercept_:.10},")
-print(f"        std_coef_shallow: {std_model.coef_[0]:.10},")
-print(f"        std_coef_deep: {std_model.coef_[1]:.10},")
-print("    },")
+    try:
+        mean_model, std_model = fit_models(
+            df,
+            n_splits=n_splits,
+            alpha=alpha,
+            seed=seed,
+            epsilon=epsilon,
+        )
+    except Exception as exc:
+        print(f"Error fitting models: {exc}", file=sys.stderr)
+        return 1
+
+    emit_rust_params(mean_model, std_model)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

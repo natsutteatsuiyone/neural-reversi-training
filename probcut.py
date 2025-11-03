@@ -1,81 +1,108 @@
-import pandas as pd
-import numpy as np
+"""
+Train ProbCut parameters.
+"""
 
-from sklearn.linear_model import LinearRegression
+from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+from typing import Dict, Tuple
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description="Train ProbCut models from CSV data")
-parser.add_argument("csv_path", type=str, help="Path to the input CSV file")
-args = parser.parse_args()
+import pandas as pd
+from sklearn.linear_model import LinearRegression
 
-df = pd.read_csv(args.csv_path)
+import probcut_common
 
-models = {}
-epsilon = 1e-8
-
-for ply, group in df.groupby("ply"):
-    X_train = group[["shallow_depth", "deep_depth"]].values
-    y_train = group["diff"].values
-
-    # ===== Model 1: Predicting mean error (diff) =====
-    mean_model = LinearRegression()
-    mean_model.fit(X_train, y_train)
-
-    # Prediction and residual calculation for training data
-    y_train_pred = mean_model.predict(X_train)
-    residuals_train = y_train - y_train_pred
-
-    # ===== Calculation of local mean absolute residuals (training data) =====
-    avg_abs_residuals_train = []
-    X_train_df = pd.DataFrame(X_train, columns=["shallow_depth", "deep_depth"])
-
-    for i in range(len(X_train)):
-        current_shallow_depth = X_train[i, 0]
-        current_deep_depth = X_train[i, 1]
-
-        # Find indices of all points with the same shallow_depth and deep_depth
-        neighbor_indices = X_train_df[
-            (X_train_df["shallow_depth"] == current_shallow_depth)
-            & (X_train_df["deep_depth"] == current_deep_depth)
-        ].index.tolist()
-
-        # Calculate average absolute residuals for these neighbors
-        avg_abs_residual = np.mean(np.abs(residuals_train[neighbor_indices]))
-        avg_abs_residuals_train.append(avg_abs_residual)
-
-    avg_abs_residuals_train = np.array(avg_abs_residuals_train)
-
-    # For normal distribution, E(|ε|) = σ√(2/π), so σ = (mean absolute residual)*√(π/2)
-    std_targets_train = avg_abs_residuals_train * np.sqrt(np.pi / 2)
-    log_std_targets_train = np.log(std_targets_train + epsilon)
-
-    # ===== Model 2: Predicting log standard deviation =====
-    std_model = LinearRegression()
-    std_model.fit(X_train, log_std_targets_train)
-
-    models[ply] = {
-        "mean_model": mean_model,
-        "std_model": std_model,
-    }
-
-    print(f"Model construction completed for Ply {ply}.")
+build_features = probcut_common.build_features
+oof_predictions_linreg = probcut_common.oof_predictions_linreg
+smoothed_local_mae = probcut_common.smoothed_local_mae
+fit_probcut_models = probcut_common.fit_probcut_models
+format_float = probcut_common.format_float
+load_dataframe = probcut_common.load_dataframe
 
 
-print("const PROBCUT_PARAMS: [ProbcutParams; 60] = [")
+REQUIRED_COLUMNS = {"ply", "shallow_depth", "deep_depth", "diff"}
 
-for ply in range(60):
-    mean_model = models[ply]["mean_model"]
-    std_model = models[ply]["std_model"]
 
-    print("    ProbcutParams {")
-    print(f"        mean_intercept: {mean_model.intercept_:.10},")
-    print(f"        mean_coef_shallow: {mean_model.coef_[0]:.10},")
-    print(f"        mean_coef_deep: {mean_model.coef_[1]:.10},")
-    print(f"        std_intercept: {std_model.intercept_:.10},")
-    print(f"        std_coef_shallow: {std_model.coef_[0]:.10},")
-    print(f"        std_coef_deep: {std_model.coef_[1]:.10},")
-    print("    },")
+def fit_models_for_ply(group: pd.DataFrame, n_splits: int, alpha: float, seed: int, epsilon: float) -> Tuple[LinearRegression, LinearRegression]:
+    return fit_probcut_models(
+        group,
+        n_splits=n_splits,
+        alpha=alpha,
+        seed=seed,
+        epsilon=epsilon,
+    )
 
-print("];")
+
+def emit_rust_params(models: Dict[int, Tuple[LinearRegression, LinearRegression]], max_ply: int) -> None:
+    """Emit a Rust constant array, falling back to the closest trained ply when needed."""
+    learned = sorted(models.keys())
+    if not learned:
+        raise RuntimeError("No ply was learned. Check your CSV contents.")
+
+    def nearest_ply(p: int) -> int:
+        return min(learned, key=lambda q: abs(q - p))
+
+    print("const PROBCUT_PARAMS: [ProbcutParams; {}] = [".format(max_ply))
+    for ply in range(max_ply):
+        use_ply = ply if ply in models else nearest_ply(ply)
+        mean_model, std_model = models[use_ply]
+
+        print("    ProbcutParams {")
+        print(f"        mean_intercept: {format_float(mean_model.intercept_)},")
+        print(f"        mean_coef_shallow: {format_float(mean_model.coef_[0])},")
+        print(f"        mean_coef_deep: {format_float(mean_model.coef_[1])},")
+        print(f"        std_intercept: {format_float(std_model.intercept_)},")
+        print(f"        std_coef_shallow: {format_float(std_model.coef_[0])},")
+        print(f"        std_coef_deep: {format_float(std_model.coef_[1])},")
+        print("    },")
+    print("];")
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train ProbCut models from CSV data.")
+    parser.add_argument("csv_path", type=str, help="Path to the input CSV file.")
+    parser.add_argument("--max-ply", type=int, default=60, help="Number of plies to emit in the Rust array.")
+    probcut_common.add_training_cli_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    csv_path = Path(args.csv_path)
+    try:
+        df = load_dataframe(csv_path, REQUIRED_COLUMNS)
+    except FileNotFoundError:
+        print(f"Error: File {csv_path} does not exist.", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(f"Error loading/validating data: {exc}", file=sys.stderr)
+        return 1
+
+    models: Dict[int, Tuple[LinearRegression, LinearRegression]] = {}
+    n_splits = max(2, args.folds)
+    alpha = max(0.0, args.alpha)
+    epsilon = args.epsilon
+    seed = args.seed
+
+    for ply, group in df.groupby("ply"):
+        group = group.reset_index(drop=True)
+        try:
+            mean_model, std_model = fit_models_for_ply(
+                group,
+                n_splits=n_splits,
+                alpha=alpha,
+                seed=seed,
+                epsilon=epsilon,
+            )
+            models[int(ply)] = (mean_model, std_model)
+        except Exception as e:
+            print(f"[WARN] Skipped ply {ply} due to error: {e}", file=sys.stderr)
+
+    emit_rust_params(models, max_ply=args.max_ply)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -31,7 +31,8 @@ ckpt/
 /.goosehints
 /.windsurfrules
 /.github/copilot-instructions.md
-/AGENT.md
+/AGENTS.md
 /CLAUDE.md
 /GEMINI.md
 /llms.txt
+.serena

@@ -4,29 +4,21 @@ import torch.nn.functional as F
 import lightning as L
 from typing import Tuple, List, Iterator
 
+from model_common import (
+    NUM_FEATURES,
+    SUM_OF_FEATURES,
+    bucket_lookup_indices,
+    repeat_first_block,
+    select_bucket,
+)
 from sparse_linear import SparseLinear
 
-NUM_FEATURE_PARAMS = [
-    6561, 6561, 6561, 6561,
-    6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    6561, 6561, 6561, 6561,
-    19683, 19683, 19683, 19683,
-]
+LPA = 128
+LOUTPUT = LPA + 1
 
-
-NUM_FEATURES = len(NUM_FEATURE_PARAMS)
-SUM_OF_FEATURES = sum(NUM_FEATURE_PARAMS)
-
-LPA = 64
-L1_PA = LPA + 1
-L2 = 8
-L3 = 32
-NUM_PA_BUCKETS = 6
-NUM_LS_BUCKETS = 60
-MAX_PLY = 60
-
+NUM_PA_BUCKETS = 3
+NUM_LS_BUCKETS = 30
+MAX_PLY = 30
 
 class LayerStacks(nn.Module):
     def __init__(
@@ -37,16 +29,8 @@ class LayerStacks(nn.Module):
         self.count = count
         self.bucket_size = MAX_PLY // count
 
-        self.l1_pa = nn.Linear(
-            L1_PA,
-            L2 * count,
-        )
-        self.l2 = nn.Linear(
-            L2,
-            L3 * count,
-        )
         self.output = nn.Linear(
-            L3,
+            LOUTPUT,
             1 * count,
         )
 
@@ -54,70 +38,38 @@ class LayerStacks(nn.Module):
 
     def _init_layers(self) -> None:
         """Initialize layers to ensure all layer stacks are initialized identically."""
-        l1_pa_weight = self.l1_pa.weight
-        l1_pa_bias = self.l1_pa.bias
-        l2_weight = self.l2.weight
-        l2_bias = self.l2.bias
         output_weight = self.output.weight
         output_bias = self.output.bias
 
         with torch.no_grad():
-            output_bias.fill_(0.0)
+            output_bias.zero_()
 
-            for i in range(1, self.count):
-                start, end = i * L2, (i + 1) * L2
-                l1_pa_weight[start:end] = l1_pa_weight[:L2]
-                l1_pa_bias[start:end] = l1_pa_bias[:L2]
+            repeat_first_block(output_weight, 1, self.count)
+            repeat_first_block(output_bias, 1, self.count)
 
-                start, end = i * L3, (i + 1) * L3
-                l2_weight[start:end] = l2_weight[:L3]
-                l2_bias[start:end] = l2_bias[:L3]
-
-                output_weight[i:i+1] = output_weight[:1]
-
-    def forward(self, x_pa: torch.Tensor, ply: torch.Tensor) -> torch.Tensor:
-        batch_size = x_pa.shape[0]
-        idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
-        ls_indices = ply.flatten() // self.bucket_size
-        bucket_idx = (ls_indices + idx_offset).unsqueeze(1)
+    def forward(self, x_pa: torch.Tensor, mobility: torch.Tensor, ply: torch.Tensor) -> torch.Tensor:
+        bucket_indices = bucket_lookup_indices(ply, self.bucket_size, self.count)
 
         # Process PA features
-        l1x = self.l1_pa(x_pa).view(-1, self.count, L2)
-        l1x = torch.gather(l1x.view(-1, L2), 0, bucket_idx.expand(-1, L2))
-        l1x = l1x.clamp(0.0, 1.0)
-
-        # Second layer
-        l2x = self.l2(l1x).view(-1, self.count, L3)
-        l2x = torch.gather(l2x.view(-1, L3), 0, bucket_idx.expand(-1, L3))
-        l2x = l2x.clamp(0.0, 1.0)
+        mobility_scaled = mobility * 30 / 1023
+        x_pa_with_mobility = torch.cat([x_pa, mobility_scaled], dim=1)
 
         # Output layer
-        output = self.output(l2x).view(-1, self.count, 1)
-        output = torch.gather(output.view(-1, 1), 0, bucket_idx)
+        output = self.output(x_pa_with_mobility)
+        output = select_bucket(output, 1, bucket_indices)
+
         return output
 
-    def get_coalesced_layer_stacks(self) -> Iterator[Tuple[nn.Linear, nn.Linear, nn.Linear]]:
+    def get_layer_stacks(self) -> Iterator[Tuple[nn.Linear]]:
         """Extract individual layer stacks as separate nn.Linear modules."""
         for i in range(self.count):
             with torch.no_grad():
-                l1_pa = nn.Linear(L1_PA, L2)
-                l2 = nn.Linear(L2, L3)
-                output = nn.Linear(L3, 1)
+                output = nn.Linear(LOUTPUT, 1)
 
-                # Extract weights and biases for this stack
-                start_l2 = i * L2
-                end_l2 = (i + 1) * L2
-                start_l3 = i * L3
-                end_l3 = (i + 1) * L3
-
-                l1_pa.weight.data = self.l1_pa.weight[start_l2:end_l2]
-                l1_pa.bias.data = self.l1_pa.bias[start_l2:end_l2]
-                l2.weight.data = self.l2.weight[start_l3:end_l3]
-                l2.bias.data = self.l2.bias[start_l3:end_l3]
                 output.weight.data = self.output.weight[i:i+1]
                 output.bias.data = self.output.bias[i:i+1]
 
-                yield l1_pa, l2, output
+                yield output
 
 
 class PhaseAdaptiveInput(nn.Module):
@@ -135,10 +87,8 @@ class PhaseAdaptiveInput(nn.Module):
     def _init_layers(self) -> None:
         """Initialize layers to ensure all phase-adaptive buckets are initialized identically."""
         with torch.no_grad():
-            for i in range(1, self.count):
-                start, end = i * LPA, (i + 1) * LPA
-                self.input.weight[:, start:end] = self.input.weight[:, :LPA]
-                self.input.bias[start:end] = self.input.bias[:LPA]
+            repeat_first_block(self.input.weight, LPA, self.count, dim=1)
+            repeat_first_block(self.input.bias, LPA, self.count)
 
     def forward(
         self,
@@ -148,26 +98,10 @@ class PhaseAdaptiveInput(nn.Module):
         in_features: int,
         ply: torch.Tensor
     ) -> torch.Tensor:
-        x = self.input(feature_indices, values, batch_size, in_features).view(-1, self.count, LPA)
-
-        idx_offset = torch.arange(0, batch_size * self.count, self.count, device=ply.device)
-        
-        # Custom bucket mapping: ply < 30 = 0, 30 <= ply < 36 = 1, 36 <= ply < 42 = 2, ...
-        ply_flat = ply.flatten()
-        bucket_indices = torch.zeros_like(ply_flat, dtype=torch.long)
-        bucket_indices = torch.where(ply_flat < 30, 0, bucket_indices)
-        bucket_indices = torch.where((ply_flat >= 30) & (ply_flat < 36), 1, bucket_indices)
-        bucket_indices = torch.where((ply_flat >= 36) & (ply_flat < 42), 2, bucket_indices)
-        bucket_indices = torch.where((ply_flat >= 42) & (ply_flat < 48), 3, bucket_indices)
-        bucket_indices = torch.where((ply_flat >= 48) & (ply_flat < 54), 4, bucket_indices)
-        bucket_indices = torch.where(ply_flat >= 54, 5, bucket_indices)
-        
-        bucket_idx = (bucket_indices + idx_offset).unsqueeze(1)
-        x = torch.gather(x.view(-1, LPA), 0, bucket_idx.expand(-1, LPA))
-
-        # Apply activation and normalization
-        x = F.leaky_relu(x, negative_slope=0.125)
-        x = x.clamp(-16/127, 1.0 - 16/127) + 16/127
+        x = self.input(feature_indices, values, batch_size, in_features)
+        bucket_indices = bucket_lookup_indices(ply, self.bucket_size, self.count)
+        x = select_bucket(x, LPA, bucket_indices)
+        x = x.clamp(0.0, 1.0).pow(2.0) * (1023 / 1024)
         return x
 
     def get_layers(self) -> Iterator[nn.Linear]:
@@ -181,41 +115,19 @@ class PhaseAdaptiveInput(nn.Module):
                 yield layer
 
 
-class ReversiSmallModel(L.LightningModule):
-    def __init__(
-        self,
-        lr: float = 0.001,
-        weight_decay: float = 1e-2,
-        t_max: int = 100,
-        eta_min: float = 1e-9,
-    ):
+class ReversiSmallModel(nn.Module):
+    def __init__(self) -> None:
         super().__init__()
-        self.save_hyperparameters()
 
         # Quantization constants
-        self.score_scale = 128.0
+        self.score_scale = 64.0
+        self.eval_score_scale = 256.0
         self.weight_scale_hidden = 64.0
-        self.weight_scale_out = 16.0
-        self.quantized_one = 127.0
+        self.weight_scale_out = self.eval_score_scale * 256.0
+        self.quantized_one = 1023.0
 
         self.pa_input = PhaseAdaptiveInput(NUM_PA_BUCKETS)
-        self.layer_stacks = LayerStacks( NUM_LS_BUCKETS)
-
-        # Weight clipping configuration
-        max_hidden_weight = self.quantized_one / self.weight_scale_hidden
-        max_out_weight = (self.quantized_one ** 2) / (self.score_scale * self.weight_scale_out)
-
-        self.weight_clipping = [
-            {"params": [self.layer_stacks.l1_pa.weight], "min_weight": -max_hidden_weight, "max_weight": max_hidden_weight},
-            {"params": [self.layer_stacks.l2.weight], "min_weight": -max_hidden_weight, "max_weight": max_hidden_weight},
-            {"params": [self.layer_stacks.output.weight], "min_weight": -max_out_weight, "max_weight": max_out_weight},
-        ]
-
-    def _clip_weights(self) -> None:
-        with torch.no_grad():
-            for group in self.weight_clipping:
-                for param in group["params"]:
-                    param.clamp_(group["min_weight"], group["max_weight"])
+        self.layer_stacks = LayerStacks(NUM_LS_BUCKETS)
 
     def forward(
         self,
@@ -226,49 +138,68 @@ class ReversiSmallModel(L.LightningModule):
         in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
-        # Phase-adaptive input
         x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
-        
-        # Add mobility features
-        mobility_scaled = mobility * 3 / 127
-        x_pa = torch.cat([x_pa, mobility_scaled], dim=1)
+        return self.layer_stacks(x_pa, mobility, ply)
 
-        return self.layer_stacks(x_pa, ply)
 
+class LitReversiSmallModel(L.LightningModule):
+    def __init__(
+        self,
+        lr: float = 0.001,
+        weight_decay: float = 1e-2,
+        t_max: int = 100,
+        eta_min: float = 1e-9,
+    ):
+        super().__init__()
+        self.save_hyperparameters()
+
+        # Core model
+        self.model = ReversiSmallModel()
+
+    def forward(
+        self,
+        indices: torch.Tensor,
+        values: torch.Tensor,
+        mobility: torch.Tensor,
+        batch_size: int,
+        in_features: int,
+        ply: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.model(indices, values, mobility, batch_size, in_features, ply)
+
+    @torch.compile(fullgraph=True, options={"shape_padding": True, "triton.cudagraphs": True})
     def _step(
         self,
         batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         batch_idx: int,
-        loss_type: str,
     ) -> torch.Tensor:
-        self._clip_weights()
-
         score_target, feature_indices, mobility, ply = batch
         device = feature_indices.device
         batch_size = feature_indices.size(0)
+        ply = ply.sub(30)
 
-        # Create sparse representation
         with torch.no_grad():
             batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
             sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
             sparse_values = torch.ones(sparse_indices.size(1), device=device)
 
         score_pred = self(sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply)
-        loss = F.mse_loss(score_pred, score_target)
-        self.log(loss_type, loss)
-        return loss
+        return F.mse_loss(score_pred, score_target / self.model.score_scale)
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
-        return self._step(batch, batch_idx, "train_loss")
+        loss = self._step(batch, batch_idx)
+        return { "loss": loss }
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        self.log_dict({
+            "train_loss": outputs["loss"],
+        })
 
     def validation_step(self, batch, batch_idx: int) -> None:
-        self._step(batch, batch_idx, "val_loss")
-
-    def test_step(self, batch, batch_idx: int) -> None:
-        self._step(batch, batch_idx, "test_loss")
+        loss = self._step(batch, batch_idx)
+        self.log("val_loss", loss)
 
     def configure_optimizers(self) -> Tuple[List[torch.optim.Optimizer], List[torch.optim.lr_scheduler.LRScheduler]]:
-        # Separate parameters for weight decay
         decay_params = []
         no_decay_params = []
 
@@ -280,35 +211,42 @@ class ReversiSmallModel(L.LightningModule):
             else:
                 decay_params.append(param)
 
-        # Try to use Apex FusedAdam if available, otherwise use PyTorch AdamW
-        betas = (0.95, 0.999)
-        eps = 1e-4
+        params = [
+            {"params": decay_params, "weight_decay": self.hparams.weight_decay},
+            {"params": no_decay_params, "weight_decay": 0.0},
+        ]
+
+        betas = (0.9, 0.999)
+        eps = 1e-8
         try:
             import apex
             optimizer = apex.optimizers.FusedAdam(
-                [
-                    {"params": decay_params, "weight_decay": self.hparams.weight_decay},
-                    {"params": no_decay_params, "weight_decay": 0.0},
-                ],
+                params,
                 lr=self.hparams.lr,
                 betas=betas,
                 eps=eps,
             )
         except ImportError:
             optimizer = torch.optim.AdamW(
-                [
-                    {"params": decay_params, "weight_decay": self.hparams.weight_decay},
-                    {"params": no_decay_params, "weight_decay": 0.0},
-                ],
+                params,
                 lr=self.hparams.lr,
                 betas=betas,
                 eps=eps,
                 fused=True,
             )
 
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        import timm.optim
+        optimizer = timm.optim.Lookahead(
+            optimizer,
+            alpha=0.5,
+            k=6,
+        )
+
+        from torch.optim.lr_scheduler import CosineAnnealingLR
+        scheduler = CosineAnnealingLR(
             optimizer,
             T_max=self.hparams.t_max,
             eta_min=self.hparams.eta_min,
         )
-        return [optimizer], [scheduler]
+
+        return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": "val_loss"}

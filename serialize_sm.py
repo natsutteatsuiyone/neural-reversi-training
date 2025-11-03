@@ -1,144 +1,178 @@
 import argparse
+import sys
+from pathlib import Path
+from typing import Any
+
 import torch
-import numpy as np
-import zstandard as zstd
-import model_sm as M
-from typing import List, Union
 import torch.nn as nn
-import os
+import zstandard as zstd
 
+import model_sm as M
 import version
+from serialize_utils import (
+    maybe_ascii_hist,
+    normalize_state_dict_keys,
+    quantize_tensor,
+    tensor_to_little_endian_bytes,
+)
 
-
-def ascii_hist(name: str, x: Union[List[float], np.ndarray], bins: int = 10) -> None:
-    if len(x) == 0:
-        print(f"{name}\nNo data provided.")
-        return
-
-    N, edges = np.histogram(x, bins=bins)
-    width = 50
-    nmax = N.max() if N.max() != 0 else 1
-
-    print(name)
-    for i in range(len(N)):
-        bin_range = f"[{edges[i]:.4g}, {edges[i + 1]:.4g})".ljust(20)
-        bar = "#" * int(N[i] * width / nmax)
-        count = f"({N[i]:d})".rjust(6)
-        print(f"{bin_range}| {bar} {count}")
+DEFAULT_COMPRESSION_LEVEL = 1
 
 
 class NNWriter:
+    buf: bytearray
+    show_hist: bool
+
     def __init__(self, model: M.ReversiSmallModel, show_hist: bool = True) -> None:
         self.buf = bytearray()
         self.show_hist = show_hist
 
         self.write_input_layer(model)
-        for (
-            l1_pa,
-            l2,
-            output,
-        ) in model.layer_stacks.get_coalesced_layer_stacks():
-            self.write_fc_layer(model, l1_pa)
-            self.write_fc_layer(model, l2)
+        for output in model.layer_stacks.get_layer_stacks():
             self.write_fc_layer(model, output, is_output=True)
 
-    def write_input_layer(self, model: M.ReversiSmallModel) -> None:
-        for p in model.pa_input.get_layers():
-            bias = (
-                p.bias.detach().cpu().mul(model.quantized_one).round().to(torch.int16)
-            )
-            weight = (
-                p.weight.detach().cpu().mul(model.quantized_one).round().to(torch.int16)
-            )
+    def get_buffer(self) -> bytes:
+        return bytes(self.buf)
 
-            self.buf.extend(bias.flatten().numpy().tobytes())
-            self.buf.extend(weight.flatten().numpy().tobytes())
+    def write_input_layer(self, model: M.ReversiSmallModel) -> None:
+        for pa_layer in model.pa_input.get_layers():
+            bias = quantize_tensor(pa_layer.bias, model.quantized_one, torch.int16)
+            weight = quantize_tensor(pa_layer.weight, model.quantized_one, torch.int16)
+            self._write_dense_block("pa", bias, weight, "int16")
+
+    def _write_dense_block(
+        self,
+        prefix: str,
+        bias: torch.Tensor,
+        weight: torch.Tensor,
+        dtype: str,
+    ) -> None:
+        maybe_ascii_hist(f"{prefix} bias:", bias, show=self.show_hist)
+        maybe_ascii_hist(f"{prefix} weight:", weight, show=self.show_hist)
+        self._extend_tensor(bias, dtype)
+        self._extend_tensor(weight, dtype)
 
     def write_fc_layer(
         self, model: M.ReversiSmallModel, layer: nn.Module, is_output: bool = False
     ) -> None:
-        kWeightScaleHidden = model.weight_scale_hidden
-        kWeightScaleOut = (
-            model.score_scale * model.weight_scale_out / model.quantized_one
-        )
-        kWeightScale = kWeightScaleOut if is_output else kWeightScaleHidden
-        kBiasScaleOut = model.weight_scale_out * model.score_scale
-        kBiasScaleHidden = model.weight_scale_hidden * model.quantized_one
-        kBiasScale = kBiasScaleOut if is_output else kBiasScaleHidden
-        kMaxWeight = model.quantized_one / kWeightScale
+        weight_scale_hidden = model.weight_scale_hidden
+        weight_scale_out = model.score_scale * model.weight_scale_out / model.quantized_one
+        weight_scale = weight_scale_out if is_output else weight_scale_hidden
+        bias_scale_out = model.weight_scale_out * model.score_scale
+        bias_scale_hidden = model.weight_scale_hidden * model.quantized_one
+        bias_scale = bias_scale_out if is_output else bias_scale_hidden
+        max_weight = model.quantized_one / weight_scale
 
-        bias = layer.bias.detach().cpu()
-        bias = bias.mul(kBiasScale).round().to(torch.int32)
+        with torch.no_grad():
+            bias_tensor = layer.bias.detach().cpu()
+            weight_tensor = layer.weight.detach().cpu()
 
-        weight = layer.weight.detach().cpu()
-        clipped_diff = weight.clamp(-kMaxWeight, kMaxWeight) - weight
-        clipped = torch.count_nonzero(clipped_diff)
-        total_elements = torch.numel(weight)
-        clipped_max = torch.max(torch.abs(clipped_diff)).item()
+        bias = quantize_tensor(bias_tensor, bias_scale, torch.int32)
 
-        weight = (
-            weight.clamp(-kMaxWeight, kMaxWeight)
-            .mul(kWeightScale)
-            .round()
-            .to(torch.int8)
-        )
-
-        if self.show_hist:
-            print(
-                f"Layer has {clipped}/{total_elements} clipped weights. "
-                f"Maximum excess: {clipped_max} (limit: {kMaxWeight})."
+        if is_output:
+            weight = weight_tensor.mul(weight_scale).round().to(torch.int16)
+        else:
+            weight = (
+                weight_tensor.clamp(-max_weight, max_weight)
+                .mul(weight_scale)
+                .round()
+                .to(torch.int8)
             )
 
-        num_input = weight.shape[1]
-        if num_input % 32 != 0:
-            padded_num = num_input + (32 - num_input % 32)
-            if self.show_hist:
-                print(f"Padding input from {num_input} to {padded_num} elements.")
-            new_w = torch.zeros(weight.shape[0], padded_num, dtype=torch.int8)
-            new_w[:, :num_input] = weight
-            weight = new_w
+        self._extend_tensor(bias, "int32")
+        self._extend_tensor(weight, "int16" if is_output else "int8")
 
-        self.buf.extend(bias.flatten().numpy().tobytes())
-        self.buf.extend(weight.flatten().numpy().tobytes())
-
-        if self.show_hist:
-            if is_output:
-                print("Output layer parameters:")
-                print(f"Weight: {weight.flatten()}")
-                print(f"Bias: {bias.flatten()}")
+        if self.show_hist and is_output:
+            print("Output layer parameters:")
+            print(f"Weight: {weight.flatten()}")
+            print(f"Bias: {bias.flatten()}")
             print()
+
+    def _extend_tensor(self, tensor: torch.Tensor, dtype: str) -> None:
+        self.buf.extend(tensor_to_little_endian_bytes(tensor, dtype))
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Serialize a ReversiSmallModel to compressed binary format."
+    )
     parser.add_argument(
         "--checkpoint",
         type=str,
         required=True,
     )
-    parser.add_argument("--cl", type=int, default=7)
+    parser.add_argument(
+        "--cl",
+        type=int,
+        default=DEFAULT_COMPRESSION_LEVEL,
+        help=f"Compression level (default: {DEFAULT_COMPRESSION_LEVEL})",
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
         default=".",
     )
-    parser.add_argument("--no-hist", action="store_true")
+    parser.add_argument(
+        "--filename",
+        type=str,
+        default=f"eval_sm-{version.get_version_hash()}.zst",
+    )
+    parser.add_argument(
+        "--no-hist",
+        action="store_true",
+        help="Disable histogram display during serialization",
+    )
     args = parser.parse_args()
 
-    model = M.ReversiSmallModel.load_from_checkpoint(args.checkpoint)
-    model.eval()
+    try:
+        ckpt = torch.load(args.checkpoint, map_location="cpu")
+    except FileNotFoundError:
+        parser.error(f"Checkpoint file not found: {args.checkpoint}")
+    except Exception as exc:
+        parser.error(f"Failed to load checkpoint: {exc}")
 
-    writer = NNWriter(model, show_hist=not args.no_hist)
+    lit_model = M.LitReversiSmallModel()
+
+    has_ema_metadata = isinstance(ckpt, dict) and any(
+        key in ckpt for key in ("averaging_state", "current_model_state")
+    )
+
+    if isinstance(ckpt, dict) and "current_model_state" in ckpt:
+        base_state = normalize_state_dict_keys(ckpt["current_model_state"])
+        lit_model.load_state_dict(base_state, strict=False)
+
+    state_source: Any
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state_source = ckpt["state_dict"]
+    else:
+        state_source = ckpt
+
+    state = normalize_state_dict_keys(state_source)
+    _, unexpected = lit_model.load_state_dict(state, strict=False)
+    if has_ema_metadata:
+        print("Using EMA-averaged weights from checkpoint.", flush=True)
+    if unexpected:
+        print(
+            f"Warning: unexpected keys in checkpoint: {sorted(unexpected)[:5]}...",
+            flush=True,
+        )
+
+    lit_model.eval()
+
+    writer = NNWriter(lit_model.model, show_hist=not args.no_hist)
     cctx = zstd.ZstdCompressor(level=args.cl)
-    compressed_data = cctx.compress(writer.buf)
+    compressed_data = cctx.compress(writer.get_buffer())
 
-    output_filename = f"eval_sm-{version.get_version_hash()}.zst"
-    output_path = os.path.join(args.output_dir, output_filename)
+    output_path = Path(args.output_dir) / args.filename
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-
-    with open(output_path, "wb") as f:
-        f.write(compressed_data)
+    try:
+        with open(output_path, "wb") as f:
+            f.write(compressed_data)
+        print(f"Model serialized to: {output_path}")
+    except IOError as exc:
+        print(f"Error writing output file: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 import model
 import model_sm
+import model_common
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=0.001,
+        default=1e-3,
         help="Learning rate",
     )
     parser.add_argument(
@@ -96,19 +97,12 @@ def prepare_dataloaders(
     train_files = [str(p) for p in Path(train_dir).glob("*.zst")]
     val_files = [str(p) for p in Path(val_dir).glob("*.zst")]
 
-    if small:
-        num_features = model_sm.NUM_FEATURES
-        num_feature_params = model_sm.NUM_FEATURE_PARAMS
-    else:
-        num_features = model.NUM_FEATURES
-        num_feature_params = model.NUM_FEATURE_PARAMS
-
     train_dataset = FeatureDataset(
         filepaths=train_files,
         batch_size=batch_size,
         file_usage_ratio=file_usage_ratio,
-        num_features=num_features,
-        num_feature_params=num_feature_params,
+        num_features=model_common.NUM_FEATURES,
+        num_feature_params=model_common.NUM_FEATURE_PARAMS,
         shuffle=shuffle,
     )
     train_loader = DataLoader(
@@ -123,8 +117,8 @@ def prepare_dataloaders(
         filepaths=val_files,
         batch_size=batch_size,
         file_usage_ratio=1.0,
-        num_features=num_features,
-        num_feature_params=num_feature_params,
+        num_features=model_common.NUM_FEATURES,
+        num_feature_params=model_common.NUM_FEATURE_PARAMS,
         shuffle=False,
     )
     val_loader = DataLoader(
@@ -137,24 +131,29 @@ def prepare_dataloaders(
 
     return train_loader, val_loader
 
-
-def prepare_logger_and_callbacks(small: bool) -> tuple:
-    logger = TensorBoardLogger("tb_logs", name="reversi_model")
+def prepare_callbacks(small: bool) -> tuple:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     dirpath = "ckpt/small" if small else "ckpt"
 
-    epoch_checkpoint = ModelCheckpoint(
-        save_top_k=20,
+    checkpoint_callback = ModelCheckpoint(
+        save_top_k=32,
         monitor="val_loss",
         mode="min",
         dirpath=dirpath,
-        filename="{epoch}-{val_loss:.4f}",
+        filename="{epoch}-{val_loss:.8f}",
         save_on_train_epoch_end=True,
-        save_last=True,
     )
 
-    return logger, [epoch_checkpoint, lr_monitor]
+    # checkpoint_callback = ModelCheckpoint(
+    #     save_last=True,
+    #     every_n_epochs=10,
+    #     filename="{epoch}-{val_loss:.8f}",
+    #     dirpath=dirpath,
+    #     save_top_k=-1,
+    # )
+
+    return [checkpoint_callback, lr_monitor]
 
 def main():
     args = parse_args()
@@ -173,39 +172,45 @@ def main():
 
     if args.small:
         if args.resume_from_weights:
-            reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
+            reversi_model = model_sm.LitReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
             checkpoint = torch.load(args.resume_from_weights, weights_only=True)
             reversi_model.load_state_dict(checkpoint["state_dict"])
         else:
-            reversi_model = model_sm.ReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
+            reversi_model = model_sm.LitReversiSmallModel(lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay)
     else:
         if args.resume_from_checkpoint:
-            reversi_model = model.ReversiModel(
-                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            reversi_model = model.LitReversiModel(
+                lr=args.lr, weight_decay=args.weight_decay, t_max=args.epochs
             )
         elif args.resume_from_weights:
-            reversi_model = model.ReversiModel(
-                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            reversi_model = model.LitReversiModel(
+                lr=args.lr, weight_decay=args.weight_decay, t_max=args.epochs
             )
             checkpoint = torch.load(args.resume_from_weights, weights_only=True)
-            reversi_model.load_state_dict(checkpoint["state_dict"])
+            state = checkpoint["state_dict"]
+            # Backward-compat: map old keys (no 'model.' prefix) to new ones
+            if not any(k.startswith("model.") for k in state.keys()):
+                state = {f"model.{k}": v for k, v in state.items()}
+            reversi_model.load_state_dict(state, strict=False)
         else:
-            reversi_model = model.ReversiModel(
-                lr=args.lr, t_max=args.epochs, weight_decay=args.weight_decay
+            reversi_model = model.LitReversiModel(
+                lr=args.lr, weight_decay=args.weight_decay, t_max=args.epochs
             )
 
-    logger, callbacks = prepare_logger_and_callbacks(args.small)
+    logger = TensorBoardLogger("tb_logs", name="reversi_model")
+    callbacks = prepare_callbacks(args.small)
 
     trainer = L.Trainer(
         callbacks=callbacks,
         log_every_n_steps=2000,
         logger=logger,
-        max_epochs=args.epochs + 1,
+        max_epochs=args.epochs,
         precision="bf16-mixed",
+        gradient_clip_val=1.0,
+        gradient_clip_algorithm="norm",
     )
 
     torch.set_float32_matmul_precision("high")
-    reversi_model = torch.compile(reversi_model, mode="reduce-overhead")
     trainer.fit(
         reversi_model,
         train_dataloaders=train_loader,

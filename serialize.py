@@ -8,17 +8,14 @@ Classes:
     NNWriter: Handles the serialization of neural network models.
 
 Functions:
-    ascii_hist: Display ASCII histogram for data visualization.
     main: CLI entry point for model serialization.
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import List, Union
+from typing import Any
 
-import numpy as np
-import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,96 +23,25 @@ import zstandard as zstd
 
 import model as M
 import version
+from serialize_utils import (
+    maybe_ascii_hist,
+    normalize_state_dict_keys,
+    quantize_tensor,
+    tensor_to_little_endian_bytes,
+)
 
 # Constants
 PADDING_ALIGNMENT = 32  # Neural network weight alignment requirement
-DEFAULT_COMPRESSION_LEVEL = 7
-DEFAULT_HISTOGRAM_BINS = 10
-HISTOGRAM_WIDTH = 50
-BIN_RANGE_WIDTH = 20
-COUNT_WIDTH = 6
-FLOAT_PRECISION = 4
-
-
-def ascii_hist(
-    name: str,
-    x: Union[List[float], npt.NDArray[np.float64]],
-    bins: int = DEFAULT_HISTOGRAM_BINS
-) -> None:
-    """Display an ASCII histogram of the data.
-
-    Args:
-        name: Title for the histogram.
-        x: Data to visualize.
-        bins: Number of bins for the histogram.
-
-    Raises:
-        ValueError: If bins <= 0.
-        TypeError: If x is not a list or numpy array.
-    """
-    if bins <= 0:
-        raise ValueError(f"Number of bins must be positive, got {bins}")
-
-    if not isinstance(x, (list, np.ndarray)):
-        raise TypeError(f"Expected list or numpy array, got {type(x)}")
-
-    if len(x) == 0:
-        print(f"{name}\nNo data provided.")
-        return
-
-    histogram_counts, bin_edges = np.histogram(x, bins=bins)
-    max_count = histogram_counts.max() if histogram_counts.max() != 0 else 1
-
-    print(name)
-    for i in range(len(histogram_counts)):
-        bin_range = f"[{bin_edges[i]:.{FLOAT_PRECISION}g}, {bin_edges[i + 1]:.{FLOAT_PRECISION}g})".ljust(BIN_RANGE_WIDTH)
-        bar = "#" * int(histogram_counts[i] * HISTOGRAM_WIDTH / max_count)
-        count = f"({histogram_counts[i]:d})".rjust(COUNT_WIDTH)
-        print(f"{bin_range}| {bar} {count}")
-
-
-def quantize_tensor(
-    tensor: torch.Tensor,
-    scale: float,
-    dtype: torch.dtype
-) -> torch.Tensor:
-    """Quantize a tensor with the given scale and convert to specified dtype.
-
-    Args:
-        tensor: Input tensor to quantize.
-        scale: Scale factor for quantization.
-        dtype: Target data type.
-
-    Returns:
-        Quantized tensor.
-    """
-    with torch.no_grad():
-        return tensor.cpu().mul(scale).round().to(dtype)
+DEFAULT_COMPRESSION_LEVEL = 1
 
 
 class NNWriter:
-    """Serializes ReversiModel to a binary format with quantization.
-
-    The serialization format (little-endian):
-    - Input layer: bias (int16) + weight (int16)
-    - Hidden layers: bias (int32) + weight (int8, padded to 32-byte alignment)
-    - Output layer: bias (int32) + weight (int8)
-
-    Attributes:
-        buf: Binary buffer containing serialized data.
-        show_hist: Whether to display histograms during serialization.
-    """
+    """Serialize ``ReversiModel`` instances into the binary NNUE format."""
 
     buf: bytearray
     show_hist: bool
 
     def __init__(self, model: M.ReversiModel, show_hist: bool = True) -> None:
-        """Initialize the NNWriter.
-
-        Args:
-            model: The ReversiModel to serialize.
-            show_hist: Whether to display histograms during serialization.
-        """
         self.buf = bytearray()
         self.show_hist = show_hist
 
@@ -125,109 +51,82 @@ class NNWriter:
             l1_ps,
             l2,
             output,
-        ) in model.layer_stacks.get_coalesced_layer_stacks():
+        ) in model.layer_stacks.get_layer_stacks():
             self.write_fc_layer(model, l1_base)
             self.write_fc_layer(model, l1_ps)
             self.write_fc_layer(model, l2)
             self.write_fc_layer(model, output, is_output=True)
 
-
     def get_buffer(self) -> bytes:
-        """Return the serialized buffer.
-
-        Returns:
-            The serialized model data as bytes.
-        """
+        """Return the serialized buffer."""
         return bytes(self.buf)
 
     def write_input_layer(self, model: M.ReversiModel) -> None:
-        """Write the input layer to the buffer.
+        """Write the input layer to the buffer."""
+        base_layer = model.base_input
+        scale = model.quantized_one * 2
+        ft_bias = quantize_tensor(base_layer.bias, scale, torch.int16)
+        ft_weight = quantize_tensor(base_layer.weight, scale, torch.int16)
+        self._write_dense_block("ft", ft_bias, ft_weight, "int16")
 
-        Args:
-            model: The ReversiModel containing the input layer.
-        """
-        layer = model.base_input
-        bias = quantize_tensor(layer.bias, model.quantized_one, torch.int16)
-        weight = quantize_tensor(layer.weight, model.quantized_one, torch.int16)
+        for pa_layer in model.pa_input.get_layers():
+            pa_bias = quantize_tensor(pa_layer.bias, scale, torch.int16)
+            pa_weight = quantize_tensor(pa_layer.weight, scale, torch.int16)
+            self._write_dense_block("pa", pa_bias, pa_weight, "int16")
 
-        if self.show_hist:
-            ascii_hist("ft bias:", bias.numpy())
-            ascii_hist("ft weight:", weight.numpy())
-
-        # Ensure little-endian byte order
-        self.buf.extend(bias.flatten().numpy().astype('<i2').tobytes())
-        self.buf.extend(weight.flatten().numpy().astype('<i2').tobytes())
-
-        for layer in model.pa_input.get_layers():
-            bias = quantize_tensor(layer.bias, model.quantized_one, torch.int16)
-            weight = quantize_tensor(layer.weight, model.quantized_one, torch.int16)
-
-            # Ensure little-endian byte order
-            self.buf.extend(bias.flatten().numpy().astype('<i2').tobytes())
-            self.buf.extend(weight.flatten().numpy().astype('<i2').tobytes())
+    def _write_dense_block(
+        self,
+        prefix: str,
+        bias: torch.Tensor,
+        weight: torch.Tensor,
+        dtype: str,
+    ) -> None:
+        maybe_ascii_hist(f"{prefix} bias:", bias, show=self.show_hist)
+        maybe_ascii_hist(f"{prefix} weight:", weight, show=self.show_hist)
+        self._extend_tensor(bias, dtype)
+        self._extend_tensor(weight, dtype)
 
     def write_fc_layer(
         self, model: M.ReversiModel, layer: nn.Module, is_output: bool = False
     ) -> None:
-        """Write a fully connected layer to the buffer.
-
-        Args:
-            model: The ReversiModel for accessing quantization parameters.
-            layer: The layer to serialize.
-            is_output: Whether this is the output layer.
-        """
-        kWeightScaleHidden = model.weight_scale_hidden
-        kWeightScaleOut = (
-            model.score_scale * model.weight_scale_out / model.quantized_one
-        )
-        kWeightScale = kWeightScaleOut if is_output else kWeightScaleHidden
-        kBiasScaleOut = model.weight_scale_out * model.score_scale
-        kBiasScaleHidden = model.weight_scale_hidden * model.quantized_one
-        kBiasScale = kBiasScaleOut if is_output else kBiasScaleHidden
-        kMaxWeight = model.quantized_one / kWeightScale
+        """Write a fully connected layer to the buffer."""
+        weight_scale_hidden = model.weight_scale_hidden
+        weight_scale_out = model.score_scale * model.weight_scale_out / model.quantized_one
+        weight_scale = weight_scale_out if is_output else weight_scale_hidden
+        bias_scale_out = model.weight_scale_out * model.score_scale
+        bias_scale_hidden = model.weight_scale_hidden * model.quantized_one
+        bias_scale = bias_scale_out if is_output else bias_scale_hidden
 
         with torch.no_grad():
-            bias_tensor = layer.bias.cpu()
-            weight_tensor = layer.weight.cpu()
+            bias_tensor = layer.bias.detach().cpu()
+            weight_tensor = layer.weight.detach().cpu()
 
-        bias = quantize_tensor(bias_tensor, kBiasScale, torch.int32)
-        weight = weight_tensor
-        clipped_diff = weight.clamp(-kMaxWeight, kMaxWeight) - weight
-        clipped = torch.count_nonzero(clipped_diff)
-        total_elements = torch.numel(weight)
-        clipped_max = torch.max(torch.abs(clipped_diff)).item()
-
-        weight = (
-            weight.clamp(-kMaxWeight, kMaxWeight)
-            .mul(kWeightScale)
-            .round()
-            .to(torch.int8)
-        )
-
-        if self.show_hist:
-            print(
-                f"Layer has {clipped}/{total_elements} clipped weights. "
-                f"Maximum excess: {clipped_max} (limit: {kMaxWeight})."
+        bias = quantize_tensor(bias_tensor, bias_scale, torch.int32)
+        if is_output:
+            weight = weight_tensor.mul(weight_scale).round().to(torch.int16)
+        else:
+            weight = (
+                weight_tensor.clamp(-model.max_hidden_weight, model.max_hidden_weight)
+                .mul(weight_scale)
+                .round()
+                .to(torch.int8)
             )
 
         num_input = weight.shape[1]
         if num_input % PADDING_ALIGNMENT != 0:
             pad_size = PADDING_ALIGNMENT - (num_input % PADDING_ALIGNMENT)
-            padded_num = num_input + pad_size
-            if self.show_hist:
-                print(f"Padding input from {num_input} to {padded_num} elements.")
-            weight = F.pad(weight, (0, pad_size), mode='constant', value=0)
+            weight = F.pad(weight, (0, pad_size), mode="constant", value=0)
 
-        # Ensure little-endian byte order
-        self.buf.extend(bias.flatten().numpy().astype('<i4').tobytes())
-        self.buf.extend(weight.flatten().numpy().astype('<i1').tobytes())
+        self._extend_tensor(bias, "int32")
+        self._extend_tensor(weight, "int16" if is_output else "int8")
 
-        if self.show_hist:
-            if is_output:
-                print("Output layer parameters:")
-                print(f"Weight: {weight.flatten()}")
-                print(f"Bias: {bias.flatten()}")
-            print()
+        if self.show_hist and is_output:
+            print("Output layer parameters:")
+            print(f"Weight: {weight.flatten()}")
+            print(f"Bias: {bias.flatten()}")
+
+    def _extend_tensor(self, tensor: torch.Tensor, dtype: str) -> None:
+        self.buf.extend(tensor_to_little_endian_bytes(tensor, dtype))
 
 def main() -> None:
     """CLI entry point for model serialization."""
@@ -263,15 +162,40 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        model = M.ReversiModel.load_from_checkpoint(args.checkpoint)
+        ckpt = torch.load(args.checkpoint, map_location="cpu")
     except FileNotFoundError:
         parser.error(f"Checkpoint file not found: {args.checkpoint}")
     except Exception as e:
         parser.error(f"Failed to load checkpoint: {e}")
 
-    model.eval()
+    # Instantiate LitReversiModel and load weights with backward-compat mapping
+    lit_model = M.LitReversiModel()
 
-    writer = NNWriter(model, show_hist=not args.no_hist)
+    has_ema_metadata = isinstance(ckpt, dict) and any(
+        key in ckpt for key in ("averaging_state", "current_model_state")
+    )
+
+    if isinstance(ckpt, dict) and "current_model_state" in ckpt:
+        base_state = normalize_state_dict_keys(ckpt["current_model_state"])
+        lit_model.load_state_dict(base_state, strict=False)
+
+    state_source: Any
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        state_source = ckpt["state_dict"]
+    else:
+        state_source = ckpt
+
+    state = normalize_state_dict_keys(state_source)
+    _, unexpected = lit_model.load_state_dict(state, strict=False)
+    if has_ema_metadata:
+        print("Using EMA-averaged weights from checkpoint.", flush=True)
+    if unexpected:
+        print(f"Warning: unexpected keys in checkpoint: {sorted(unexpected)[:5]}...", flush=True)
+
+    lit_model.eval()
+
+    # Use the core model for serialization
+    writer = NNWriter(lit_model.model, show_hist=not args.no_hist)
     cctx = zstd.ZstdCompressor(level=args.cl)
     compressed_data = cctx.compress(writer.get_buffer())
 

@@ -20,7 +20,7 @@ cd neural-reversi-training
 ```bash
 uv venv
 uv sync
-uv pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.7.0+cu128.html
+uv pip install torch-scatter torch-sparse --no-build-isolation
 ```
 
 ### 3. Optional: NVIDIA Apex (Recommended for Performance)
