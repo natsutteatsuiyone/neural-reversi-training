@@ -105,16 +105,38 @@ uv run train.py --train_data ./data/train --val_data ./data/val --batch_size 819
 
 Convert trained checkpoint to a weight file:
 
+### Large Model (Default)
+
 ```bash
-uv run serialize.py --checkpoint ./chkpt/reversi-best.ckpt --output ./eval.zst
+uv run serialize.py --checkpoint ./ckpt/large/reversi-best.ckpt
 ```
 
-### `serialize.py` Arguments
+### Small Model
+
+```bash
+uv run serialize_sm.py --checkpoint ./ckpt/small/reversi-best.ckpt
+```
+
+### WASM Model
+
+```bash
+uv run serialize_wasm.py --checkpoint ./ckpt/wasm/reversi-best.ckpt
+```
+
+### Serialization Arguments
+
+All serialization scripts (`serialize.py`, `serialize_sm.py`, `serialize_wasm.py`) support the following arguments:
 
 - `--checkpoint`: (Required) Checkpoint file path
-- `--output`: Output weight file path (default: eval.zst)
-- `--cl`: Compression level (default: 7)
+- `--output_dir`: Output directory path (default: current directory)
+- `--filename`: Output filename (default: auto-generated based on model variant and version)
+- `--cl`: Compression level (default: 1)
 - `--no-hist`: Disable histogram display
+
+**Example with custom output:**
+```bash
+uv run serialize.py --checkpoint ./ckpt/large/reversi-best.ckpt --output_dir ./weights --filename my_model.zst
+```
 
 The output is a zstandard-compressed binary, compatible with the Neural Reversi engine.
 
