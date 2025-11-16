@@ -44,6 +44,12 @@ uv pip install -v --no-deps --no-cache-dir --disable-pip-version-check --no-buil
 uv run train.py --train_data ./data/train --val_data ./data/val
 ```
 
+### Train the WASM Model
+
+```bash
+uv run train.py --train_data ./data/train --val_data ./data/val --model_variant wasm
+```
+
 ### Resume Training from Checkpoint
 
 ```bash
@@ -67,7 +73,7 @@ uv run train.py --train_data ./data/train --val_data ./data/val --resume_from_ch
 - `--shuffle`: Shuffle the dataset (default: True)
 - `--weight_decay`: Weight decay for optimizer (default: 0.01)
 - `--file_usage_ratio`: Ratio of files to use per epoch (default: 1.0)
-- `--small`: Use small model architecture
+- `--model_variant`: Model architecture to train: `large` (default), `small`, or `wasm` (the previous `--small` flag maps to `--model_variant small`)
 
 ### Performance Optimization
 
@@ -90,7 +96,7 @@ uv run train.py --train_data ./data/train --val_data ./data/val --batch_size 819
 
 ### Output
 
-- Checkpoints saved in `ckpt/` (or `ckpt/small/` for small models)
+- Checkpoints saved in `ckpt/` (or `ckpt/<model_variant>/` for non-large models)
 - TensorBoard logs saved in `tb_logs/`
 - Best models saved based on validation loss
 - Last checkpoint automatically saved as `last.ckpt`
