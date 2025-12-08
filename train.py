@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr",
         type=float,
-        default=1e-3,
+        default=5e-4,
         help="Learning rate",
     )
     parser.add_argument(

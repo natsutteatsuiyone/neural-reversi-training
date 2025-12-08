@@ -1,6 +1,6 @@
 import binascii
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 
 def get_version_hash() -> str:
     crc = binascii.crc32(VERSION.encode('utf-8')) & 0xffffffff

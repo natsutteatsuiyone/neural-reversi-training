@@ -14,7 +14,7 @@ from model_common import (
 from sparse_linear import SparseLinear
 
 LPA = 128
-LOUTPUT = LPA + 1
+LOUTPUT = LPA
 
 NUM_PA_BUCKETS = 3
 NUM_LS_BUCKETS = 30
@@ -47,17 +47,10 @@ class LayerStacks(nn.Module):
             repeat_first_block(output_weight, 1, self.count)
             repeat_first_block(output_bias, 1, self.count)
 
-    def forward(self, x_pa: torch.Tensor, mobility: torch.Tensor, ply: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_pa: torch.Tensor, ply: torch.Tensor) -> torch.Tensor:
         bucket_indices = bucket_lookup_indices(ply, self.bucket_size, self.count)
-
-        # Process PA features
-        mobility_scaled = mobility * 30 / 1023
-        x_pa_with_mobility = torch.cat([x_pa, mobility_scaled], dim=1)
-
-        # Output layer
-        output = self.output(x_pa_with_mobility)
+        output = self.output(x_pa)
         output = select_bucket(output, 1, bucket_indices)
-
         return output
 
     def get_layer_stacks(self) -> Iterator[Tuple[nn.Linear]]:
@@ -133,13 +126,12 @@ class ReversiSmallModel(nn.Module):
         self,
         indices: torch.Tensor,
         values: torch.Tensor,
-        mobility: torch.Tensor,
         batch_size: int,
         in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
         x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
-        return self.layer_stacks(x_pa, mobility, ply)
+        return self.layer_stacks(x_pa, ply)
 
 
 class LitReversiSmallModel(L.LightningModule):
@@ -160,12 +152,11 @@ class LitReversiSmallModel(L.LightningModule):
         self,
         indices: torch.Tensor,
         values: torch.Tensor,
-        mobility: torch.Tensor,
         batch_size: int,
         in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(indices, values, mobility, batch_size, in_features, ply)
+        return self.model(indices, values, batch_size, in_features, ply)
 
     @torch.compile(fullgraph=True, options={"shape_padding": True, "triton.cudagraphs": True})
     def _step(
@@ -173,7 +164,7 @@ class LitReversiSmallModel(L.LightningModule):
         batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         batch_idx: int,
     ) -> torch.Tensor:
-        score_target, feature_indices, mobility, ply = batch
+        score_target, feature_indices, _mobility, ply = batch
         device = feature_indices.device
         batch_size = feature_indices.size(0)
         ply = ply.sub(30)
@@ -183,7 +174,7 @@ class LitReversiSmallModel(L.LightningModule):
             sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
             sparse_values = torch.ones(sparse_indices.size(1), device=device)
 
-        score_pred = self(sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply)
+        score_pred = self(sparse_indices, sparse_values, batch_size, SUM_OF_FEATURES, ply)
         return F.mse_loss(score_pred, score_target / self.model.score_scale)
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
