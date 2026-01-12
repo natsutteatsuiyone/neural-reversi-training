@@ -41,7 +41,7 @@ def fit_models(
 
 
 def emit_rust_params(mean_model: LinearRegression, std_model: LinearRegression) -> None:
-    # Match build_features ordering: [sd, dd, 1 / (1 + log1p(max(dd - sd, 0))), ((dd - sd) % 2 == 0)]
+    # Match build_features ordering: [sd, dd]
     print("const PROBCUT_ENDGAME_PARAMS: ProbcutParams = ProbcutParams {")
     print(f"    mean_intercept: {format_float(mean_model.intercept_)},")
     print(f"    mean_coef_shallow: {format_float(mean_model.coef_[0])},")

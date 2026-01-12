@@ -89,6 +89,26 @@ def parse_args() -> argparse.Namespace:
     return args
 
 
+def load_compatible_weights(module: torch.nn.Module, state_dict: dict, prefix: str = "") -> None:
+    """Load weights from state_dict, skipping keys with mismatched shapes."""
+    model_state = module.state_dict()
+    compatible_state = {}
+
+    for key, value in state_dict.items():
+        if key in model_state:
+            if model_state[key].shape == value.shape:
+                compatible_state[key] = value
+            else:
+                print(f"Skipping {key}: shape mismatch "
+                      f"(checkpoint: {value.shape}, model: {model_state[key].shape})")
+        else:
+            print(f"Skipping {key}: not found in model")
+
+    missing, unexpected = module.load_state_dict(compatible_state, strict=False)
+    if missing:
+        print(f"Missing keys: {missing}")
+
+
 def prepare_dataloaders(
     train_dir: str,
     val_dir: str,
@@ -158,14 +178,14 @@ def build_reversi_model(args) -> L.LightningModule:
         reversi_model = model_sm.LitReversiSmallModel(**optimizer_kwargs)
         if args.resume_from_weights:
             checkpoint = torch.load(args.resume_from_weights, weights_only=True)
-            reversi_model.load_state_dict(checkpoint["state_dict"])
+            load_compatible_weights(reversi_model, checkpoint["state_dict"])
         return reversi_model
 
     if args.model_variant == "wasm":
         reversi_model = model_wasm.LitReversiWasmModel(**optimizer_kwargs)
         if args.resume_from_weights:
             checkpoint = torch.load(args.resume_from_weights, weights_only=True)
-            reversi_model.load_state_dict(checkpoint["state_dict"])
+            load_compatible_weights(reversi_model, checkpoint["state_dict"])
         return reversi_model
 
     reversi_model = model.LitReversiModel(**optimizer_kwargs)
@@ -178,7 +198,7 @@ def build_reversi_model(args) -> L.LightningModule:
         # Backward-compat: map old keys (no 'model.' prefix) to new ones
         if not any(k.startswith("model.") for k in state.keys()):
             state = {f"model.{k}": v for k, v in state.items()}
-        reversi_model.load_state_dict(state, strict=False)
+        load_compatible_weights(reversi_model, state)
 
     return reversi_model
 
