@@ -5,7 +5,6 @@ import lightning as L
 from typing import Tuple, List, Iterator
 
 from model_common import (
-    NUM_FEATURES,
     SUM_OF_FEATURES,
     bucket_lookup_indices,
     repeat_first_block,
@@ -86,12 +85,9 @@ class PhaseAdaptiveInput(nn.Module):
     def forward(
         self,
         feature_indices: torch.Tensor,
-        values: torch.Tensor,
-        batch_size: int,
-        in_features: int,
         ply: torch.Tensor
     ) -> torch.Tensor:
-        x = self.input(feature_indices, values, batch_size, in_features)
+        x = self.input(feature_indices)
         bucket_indices = bucket_lookup_indices(ply, self.bucket_size, self.count)
         x = select_bucket(x, LPA, bucket_indices)
         x = x.clamp(0.0, 1.0).pow(2.0) * (1023 / 1024)
@@ -124,13 +120,10 @@ class ReversiSmallModel(nn.Module):
 
     def forward(
         self,
-        indices: torch.Tensor,
-        values: torch.Tensor,
-        batch_size: int,
-        in_features: int,
+        feature_indices: torch.Tensor,
         ply: torch.Tensor,
     ) -> torch.Tensor:
-        x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
+        x_pa = self.pa_input(feature_indices, ply)
         return self.layer_stacks(x_pa, ply)
 
 
@@ -150,31 +143,21 @@ class LitReversiSmallModel(L.LightningModule):
 
     def forward(
         self,
-        indices: torch.Tensor,
-        values: torch.Tensor,
-        batch_size: int,
-        in_features: int,
+        feature_indices: torch.Tensor,
         ply: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(indices, values, batch_size, in_features, ply)
+        return self.model(feature_indices, ply)
 
-    @torch.compile(fullgraph=True, options={"shape_padding": True, "triton.cudagraphs": True})
+    @torch.compile(fullgraph=True, options={"shape_padding": True})
     def _step(
         self,
         batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         batch_idx: int,
     ) -> torch.Tensor:
         score_target, feature_indices, _mobility, ply = batch
-        device = feature_indices.device
-        batch_size = feature_indices.size(0)
         ply = ply.sub(30)
 
-        with torch.no_grad():
-            batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
-            sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
-            sparse_values = torch.ones(sparse_indices.size(1), device=device)
-
-        score_pred = self(sparse_indices, sparse_values, batch_size, SUM_OF_FEATURES, ply)
+        score_pred = self(feature_indices, ply)
         return F.mse_loss(score_pred, score_target / self.model.score_scale)
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:

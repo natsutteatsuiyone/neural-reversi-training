@@ -6,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from model_common import (
-    NUM_FEATURES,
     SUM_OF_FEATURES,
     bucket_lookup_indices,
     repeat_first_block,
@@ -172,12 +171,9 @@ class PhaseAdaptiveInput(nn.Module):
     def forward(
         self,
         feature_indices: torch.Tensor,
-        values: torch.Tensor,
-        batch_size: int,
-        in_features: int,
         ply: torch.Tensor
     ) -> torch.Tensor:
-        x = self.input(feature_indices, values, batch_size, in_features)
+        x = self.input(feature_indices)
         bucket_indices = bucket_lookup_indices(ply, self.bucket_size, self.count)
         x = select_bucket(x, LPA, bucket_indices)
         return x.clamp(0.0, 1.0).pow(2.0) * (255 / 256)
@@ -215,15 +211,12 @@ class ReversiModel(nn.Module):
 
     def forward(
         self,
-        indices: torch.Tensor,
-        values: torch.Tensor,
+        feature_indices: torch.Tensor,
         mobility: torch.Tensor,
-        batch_size: int,
-        in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
         # Base input processing
-        x_base = self.base_input(indices, values, batch_size, in_features)
+        x_base = self.base_input(feature_indices)
         x_base1, x_base2 = torch.split(x_base, LBASE // 2, dim=1)
 
         # Apply different activations to each half
@@ -234,7 +227,7 @@ class ReversiModel(nn.Module):
         x_base = x_base1 * x_base2 * (255 / 256)
 
         # Phase-adaptive input
-        x_pa = self.pa_input(indices, values, batch_size, in_features, ply)
+        x_pa = self.pa_input(feature_indices, ply)
 
         return self.layer_stacks(x_base, x_pa, mobility, ply)
 
@@ -272,32 +265,21 @@ class LitReversiModel(L.LightningModule):
 
     def forward(
         self,
-        indices: torch.Tensor,
-        values: torch.Tensor,
+        feature_indices: torch.Tensor,
         mobility: torch.Tensor,
-        batch_size: int,
-        in_features: int,
         ply: torch.Tensor,
     ) -> torch.Tensor:
-        return self.model(indices, values, mobility, batch_size, in_features, ply)
+        return self.model(feature_indices, mobility, ply)
 
-    @torch.compile(fullgraph=True, options={"shape_padding": True, "triton.cudagraphs": True})
+    @torch.compile(fullgraph=True, options={"shape_padding": True})
     def _step(
         self,
         batch: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor],
         batch_idx: int,
     ) -> torch.Tensor:
         score_target, feature_indices, mobility, ply = batch
-        device = feature_indices.device
-        batch_size = feature_indices.size(0)
 
-        # Create sparse representation
-        with torch.no_grad():
-            batch_indices = torch.arange(batch_size, device=device).repeat_interleave(NUM_FEATURES)
-            sparse_indices = torch.stack([batch_indices, feature_indices.view(-1)], dim=0)
-            sparse_values = torch.ones(sparse_indices.size(1), device=device)
-
-        score_pred = self(sparse_indices, sparse_values, mobility, batch_size, SUM_OF_FEATURES, ply)
+        score_pred = self(feature_indices, mobility, ply)
         score_target_scaled = score_target / self.model.score_scale
         return F.mse_loss(score_pred, score_target_scaled)
 

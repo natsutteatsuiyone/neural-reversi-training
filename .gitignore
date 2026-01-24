@@ -34,8 +34,13 @@ ckpt/
 /.goosehints
 /.windsurfrules
 /.github/copilot-instructions.md
-/AGENTS.md
-/CLAUDE.md
-/GEMINI.md
+AGENTS.md
+CLAUDE.md
+GEMINI.md
 /llms.txt
 .serena
+
+# CUDA extension build artifacts
+sparse_linear/build/
+sparse_linear/*.egg-info/
+sparse_linear/_C*.so

@@ -2,8 +2,8 @@
 
 ## Prerequisites
 
-- Python 3.12+
-- CUDA-compatible GPU
+- Python 3.14+
+- CUDA-compatible GPU (compute capability 7.0+)
 - [uv](https://github.com/astral-sh/uv) package manager
 
 ## Setup
@@ -20,10 +20,17 @@ cd neural-reversi-training
 ```bash
 uv venv
 uv sync
-uv pip install torch-scatter torch-sparse --no-build-isolation
 ```
 
-### 3. Optional: NVIDIA Apex (Recommended for Performance)
+### 3. Build CUDA Extension
+
+Build the custom sparse linear CUDA extension:
+
+```bash
+uv run python sparse_linear/setup.py build_ext --inplace
+```
+
+### 4. Optional: NVIDIA Apex (Recommended for Performance)
 
 For optimal training performance, install NVIDIA Apex:
 
