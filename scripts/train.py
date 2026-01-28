@@ -1,17 +1,32 @@
 import argparse
+import sys
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 import torch
 from torch.utils.data import DataLoader
 import lightning as L
-from dataset import FeatureDataset, custom_collate_fn
+
+# Try to import C++ implementation, fall back to Python
+try:
+    from feature_dataset import FeatureDataset, custom_collate_fn
+
+    _USE_CPP_DATASET = True
+except ImportError:
+    from training.dataset import FeatureDataset, custom_collate_fn
+
+    _USE_CPP_DATASET = False
+
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 
-import model
-import model_sm
-import model_wasm
-import model_common
+from models import model_lg
+from models import model_sm
+from models import model_wasm
+from models import model_common
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,11 +100,18 @@ def parse_args() -> argparse.Namespace:
         default="large",
         help="Model architecture to train",
     )
+    parser.add_argument(
+        "--use_python_dataset",
+        action="store_true",
+        help="Force use of Python dataset implementation instead of C++",
+    )
     args = parser.parse_args()
     return args
 
 
-def load_compatible_weights(module: torch.nn.Module, state_dict: dict, prefix: str = "") -> None:
+def load_compatible_weights(
+    module: torch.nn.Module, state_dict: dict, prefix: str = ""
+) -> None:
     """Load weights from state_dict, skipping keys with mismatched shapes."""
     model_state = module.state_dict()
     compatible_state = {}
@@ -99,8 +121,10 @@ def load_compatible_weights(module: torch.nn.Module, state_dict: dict, prefix: s
             if model_state[key].shape == value.shape:
                 compatible_state[key] = value
             else:
-                print(f"Skipping {key}: shape mismatch "
-                      f"(checkpoint: {value.shape}, model: {model_state[key].shape})")
+                print(
+                    f"Skipping {key}: shape mismatch "
+                    f"(checkpoint: {value.shape}, model: {model_state[key].shape})"
+                )
         else:
             print(f"Skipping {key}: not found in model")
 
@@ -154,6 +178,7 @@ def prepare_dataloaders(
 
     return train_loader, val_loader
 
+
 def prepare_callbacks(model_variant: str) -> tuple:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
@@ -172,7 +197,9 @@ def prepare_callbacks(model_variant: str) -> tuple:
 
 
 def build_reversi_model(args) -> L.LightningModule:
-    optimizer_kwargs = dict(lr=args.lr, weight_decay=args.weight_decay, t_max=args.epochs)
+    optimizer_kwargs = dict(
+        lr=args.lr, weight_decay=args.weight_decay, t_max=args.epochs
+    )
 
     if args.model_variant == "small":
         reversi_model = model_sm.LitReversiSmallModel(**optimizer_kwargs)
@@ -188,7 +215,7 @@ def build_reversi_model(args) -> L.LightningModule:
             load_compatible_weights(reversi_model, checkpoint["state_dict"])
         return reversi_model
 
-    reversi_model = model.LitReversiModel(**optimizer_kwargs)
+    reversi_model = model_lg.LitReversiModel(**optimizer_kwargs)
     if args.resume_from_checkpoint:
         return reversi_model
 
@@ -202,9 +229,20 @@ def build_reversi_model(args) -> L.LightningModule:
 
     return reversi_model
 
+
 def main():
+    global FeatureDataset, custom_collate_fn
+
     args = parse_args()
     model_variant = args.model_variant
+
+    # Handle dataset implementation selection
+    if args.use_python_dataset or not _USE_CPP_DATASET:
+        from training.dataset import FeatureDataset, custom_collate_fn
+
+        print("Using Python dataset implementation")
+    else:
+        print("Using C++ dataset implementation")
 
     L.seed_everything(args.seed, workers=True)
 
@@ -239,6 +277,7 @@ def main():
         val_dataloaders=val_loader,
         ckpt_path=args.resume_from_checkpoint or None,
     )
+
 
 if __name__ == "__main__":
     main()

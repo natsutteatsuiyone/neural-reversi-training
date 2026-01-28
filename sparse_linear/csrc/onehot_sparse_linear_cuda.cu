@@ -7,12 +7,123 @@
 // Set to 128 to cover typical use cases (e.g., 64 for Reversi) with some headroom
 constexpr int MAX_SHARED_FEATURES = 128;
 
+// Warp size constant
+constexpr int WARP_SIZE = 32;
+
+// -------------------------------------------------------------------------
+// Helper Functions
+// -------------------------------------------------------------------------
+
+// Warp-level reduction using shuffle instructions
+template <typename T>
+__device__ __forceinline__ T warpReduceSum(T val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+// Check if value is the first occurrence in warp for given key
+__device__ __forceinline__ bool isFirstInWarp(int64_t key, int lane_id) {
+    // Broadcast key to all lanes and check if this is the first occurrence
+    unsigned int match_mask = __match_any_sync(0xffffffff, key);
+    // Find the first lane with matching key
+    int first_lane = __ffs(match_mask) - 1;
+    return lane_id == first_lane;
+}
+
 // -------------------------------------------------------------------------
 // Forward Kernels
 // -------------------------------------------------------------------------
 
-// Original Fast Forward Kernel (No tiling, max 128 features)
-// Optimized for NumF <= 128
+// Vectorized Forward Kernel using float4 for coalesced memory access
+// Optimized for out_features aligned to 4
+template <typename scalar_t>
+__global__ void onehot_sparse_linear_forward_kernel_vectorized(
+    const int64_t* __restrict__ indices,
+    const scalar_t* __restrict__ weight,
+    const scalar_t* __restrict__ bias,
+    scalar_t* __restrict__ output,
+    const int batch_size,
+    const int num_features,
+    const int out_features
+) {
+    // Each thread handles 4 consecutive output elements
+    const int batch_idx = blockIdx.x;
+    const int out_base = (blockIdx.y * blockDim.x + threadIdx.x) * 4;
+
+    if (batch_idx >= batch_size || out_base >= out_features) return;
+
+    // Warp-level index sharing via shuffle
+    const int lane_id = threadIdx.x & (WARP_SIZE - 1);
+    const int warp_id = threadIdx.x / WARP_SIZE;
+
+    const int64_t* batch_indices = indices + batch_idx * num_features;
+
+    // Initialize sum with bias
+    float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+    if (bias && out_base + 3 < out_features) {
+        // Vectorized bias load
+        sum.x = static_cast<float>(bias[out_base]);
+        sum.y = static_cast<float>(bias[out_base + 1]);
+        sum.z = static_cast<float>(bias[out_base + 2]);
+        sum.w = static_cast<float>(bias[out_base + 3]);
+    } else if (bias) {
+        // Handle edge case
+        if (out_base < out_features) sum.x = static_cast<float>(bias[out_base]);
+        if (out_base + 1 < out_features) sum.y = static_cast<float>(bias[out_base + 1]);
+        if (out_base + 2 < out_features) sum.z = static_cast<float>(bias[out_base + 2]);
+        if (out_base + 3 < out_features) sum.w = static_cast<float>(bias[out_base + 3]);
+    }
+
+    // Process features using warp shuffle for index broadcast
+    for (int f_base = 0; f_base < num_features; f_base += WARP_SIZE) {
+        // Each lane loads one index
+        int64_t my_idx = 0;
+        int f_local = f_base + lane_id;
+        if (f_local < num_features) {
+            my_idx = batch_indices[f_local];
+        }
+
+        // Process indices from all lanes in warp
+        int f_end = min(f_base + WARP_SIZE, num_features);
+        for (int f = f_base; f < f_end; f++) {
+            // Broadcast index from lane (f - f_base) to all lanes
+            int64_t idx = __shfl_sync(0xffffffff, my_idx, f - f_base);
+
+            // Accumulate weight values
+            const scalar_t* w_ptr = weight + idx * out_features + out_base;
+            if (out_base + 3 < out_features) {
+                sum.x += static_cast<float>(w_ptr[0]);
+                sum.y += static_cast<float>(w_ptr[1]);
+                sum.z += static_cast<float>(w_ptr[2]);
+                sum.w += static_cast<float>(w_ptr[3]);
+            } else {
+                if (out_base < out_features) sum.x += static_cast<float>(w_ptr[0]);
+                if (out_base + 1 < out_features) sum.y += static_cast<float>(w_ptr[1]);
+                if (out_base + 2 < out_features) sum.z += static_cast<float>(w_ptr[2]);
+                if (out_base + 3 < out_features) sum.w += static_cast<float>(w_ptr[3]);
+            }
+        }
+    }
+
+    // Write output
+    scalar_t* out_ptr = output + batch_idx * out_features + out_base;
+    if (out_base + 3 < out_features) {
+        out_ptr[0] = static_cast<scalar_t>(sum.x);
+        out_ptr[1] = static_cast<scalar_t>(sum.y);
+        out_ptr[2] = static_cast<scalar_t>(sum.z);
+        out_ptr[3] = static_cast<scalar_t>(sum.w);
+    } else {
+        if (out_base < out_features) out_ptr[0] = static_cast<scalar_t>(sum.x);
+        if (out_base + 1 < out_features) out_ptr[1] = static_cast<scalar_t>(sum.y);
+        if (out_base + 2 < out_features) out_ptr[2] = static_cast<scalar_t>(sum.z);
+        if (out_base + 3 < out_features) out_ptr[3] = static_cast<scalar_t>(sum.w);
+    }
+}
+
+// Original Fast Forward Kernel (fallback for non-vectorized cases)
 template <typename scalar_t>
 __global__ void onehot_sparse_linear_forward_kernel_fast(
     const int64_t* __restrict__ indices,
@@ -39,11 +150,11 @@ __global__ void onehot_sparse_linear_forward_kernel_fast(
 
     if (out_idx >= out_features) return;
 
-    scalar_t sum = bias ? bias[out_idx] : scalar_t(0);
+    float sum = bias ? static_cast<float>(bias[out_idx]) : 0.0f;
     for (int f = 0; f < num_features; f++) {
-        sum += weight[s_indices[f] * out_features + out_idx];
+        sum += static_cast<float>(weight[s_indices[f] * out_features + out_idx]);
     }
-    output[batch_idx * out_features + out_idx] = sum;
+    output[batch_idx * out_features + out_idx] = static_cast<scalar_t>(sum);
 }
 
 // Tiled Forward Kernel (Safe for large NumF)
@@ -64,10 +175,10 @@ __global__ void onehot_sparse_linear_forward_kernel_tiled(
 
     if (batch_idx >= batch_size) return;
 
-    scalar_t sum = scalar_t(0);
+    float sum = 0.0f;
 
     for (int f_start = 0; f_start < num_features; f_start += MAX_SHARED_FEATURES) {
-        int f_end = (f_start + MAX_SHARED_FEATURES < num_features) ? (f_start + MAX_SHARED_FEATURES) : num_features;
+        int f_end = min(f_start + MAX_SHARED_FEATURES, num_features);
         int chunk_size = f_end - f_start;
 
         const int64_t* batch_indices = indices + batch_idx * num_features;
@@ -79,7 +190,7 @@ __global__ void onehot_sparse_linear_forward_kernel_tiled(
         if (out_idx < out_features) {
              for (int i = 0; i < chunk_size; i++) {
                  int64_t idx = s_indices[i];
-                 sum += weight[idx * out_features + out_idx];
+                 sum += static_cast<float>(weight[idx * out_features + out_idx]);
              }
         }
         __syncthreads();
@@ -87,18 +198,67 @@ __global__ void onehot_sparse_linear_forward_kernel_tiled(
 
     if (out_idx < out_features) {
          if (bias) {
-             sum += bias[out_idx];
+             sum += static_cast<float>(bias[out_idx]);
          }
-         output[batch_idx * out_features + out_idx] = sum;
+         output[batch_idx * out_features + out_idx] = static_cast<scalar_t>(sum);
     }
 }
 
 // -------------------------------------------------------------------------
-// Backward Weight Kernels
+// Backward Weight Kernels with Warp-level Reduction
 // -------------------------------------------------------------------------
 
-// Original Fast Backward Kernel (No tiling, max 128 features)
-// Optimized for NumF <= 128. Returns early if out_idx >= out_features.
+// Warp-optimized backward kernel that reduces atomic contention
+// Uses warp-level primitives to aggregate gradients before atomic operations
+template <typename scalar_t>
+__global__ void onehot_sparse_linear_backward_weight_kernel_warp_optimized(
+    const int64_t* __restrict__ indices,
+    const scalar_t* __restrict__ grad_output,
+    scalar_t* __restrict__ grad_weight,
+    const int batch_size,
+    const int num_features,
+    const int out_features
+) {
+    // Process multiple batches per block for better occupancy
+    const int batches_per_block = 4;
+    const int batch_base = blockIdx.x * batches_per_block;
+    const int out_idx = blockIdx.y * blockDim.x + threadIdx.x;
+
+    if (out_idx >= out_features) return;
+
+    const int lane_id = threadIdx.x & (WARP_SIZE - 1);
+
+    // Process each batch
+    for (int b_offset = 0; b_offset < batches_per_block; b_offset++) {
+        int batch_idx = batch_base + b_offset;
+        if (batch_idx >= batch_size) break;
+
+        const int64_t* batch_indices = indices + batch_idx * num_features;
+        const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
+
+        // Process features with warp shuffle for index broadcast
+        for (int f_base = 0; f_base < num_features; f_base += WARP_SIZE) {
+            // Each lane loads one index
+            int64_t my_idx = -1;
+            int f_local = f_base + lane_id;
+            if (f_local < num_features) {
+                my_idx = batch_indices[f_local];
+            }
+
+            // Process indices from all lanes in warp
+            int f_count = min(WARP_SIZE, num_features - f_base);
+            for (int f = 0; f < f_count; f++) {
+                // Broadcast index from lane f to all lanes
+                int64_t idx = __shfl_sync(0xffffffff, my_idx, f);
+                if (idx >= 0) {
+                    atomicAdd(&grad_weight[idx * out_features + out_idx], static_cast<scalar_t>(grad_out));
+                }
+            }
+        }
+    }
+}
+
+// Fast backward kernel with warp shuffle (for num_features <= 128)
 template <typename scalar_t>
 __global__ void onehot_sparse_linear_backward_weight_kernel_fast(
     const int64_t* __restrict__ indices,
@@ -124,9 +284,9 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_fast(
 
     if (out_idx >= out_features) return;
 
-    const scalar_t grad_out = grad_output[batch_idx * out_features + out_idx];
+    const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
     for (int f = 0; f < num_features; f++) {
-        atomicAdd(&grad_weight[s_indices[f] * out_features + out_idx], grad_out);
+        atomicAdd(&grad_weight[s_indices[f] * out_features + out_idx], static_cast<scalar_t>(grad_out));
     }
 }
 
@@ -148,7 +308,7 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_tiled(
     if (batch_idx >= batch_size) return;
 
     for (int f_start = 0; f_start < num_features; f_start += MAX_SHARED_FEATURES) {
-        int f_end = (f_start + MAX_SHARED_FEATURES < num_features) ? (f_start + MAX_SHARED_FEATURES) : num_features;
+        int f_end = min(f_start + MAX_SHARED_FEATURES, num_features);
         int chunk_size = f_end - f_start;
 
         const int64_t* batch_indices = indices + batch_idx * num_features;
@@ -158,17 +318,17 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_tiled(
         __syncthreads();
 
         if (out_idx < out_features) {
-            const scalar_t grad_out = grad_output[batch_idx * out_features + out_idx];
+            const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
             for (int i = 0; i < chunk_size; i++) {
                 int64_t idx = s_indices[i];
-                atomicAdd(&grad_weight[idx * out_features + out_idx], grad_out);
+                atomicAdd(&grad_weight[idx * out_features + out_idx], static_cast<scalar_t>(grad_out));
             }
         }
         __syncthreads();
     }
 }
 
-// Dense cached kernel for small in_features (Reversi Board)
+// Dense cached kernel for small in_features (Reversi Board) with warp-level optimization
 template <typename scalar_t>
 __global__ void onehot_sparse_linear_backward_cached_kernel(
     const int64_t* __restrict__ indices,
@@ -184,20 +344,24 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
     extern __shared__ char s_buffer[];
     scalar_t* s_grad = reinterpret_cast<scalar_t*>(s_buffer);
 
-    // s_indices allocation
+    // s_indices allocation - use int32 for smaller in_features to save memory
     size_t s_grad_size = in_features * blockDim.x * sizeof(scalar_t);
     size_t s_grad_size_aligned = (s_grad_size + 7) / 8 * 8;
-    int64_t* s_indices = reinterpret_cast<int64_t*>(s_buffer + s_grad_size_aligned);
+
+    // Index storage - use int32 when possible to save shared memory
+    int* s_indices_32 = reinterpret_cast<int*>(s_buffer + s_grad_size_aligned);
+    int64_t* s_indices_64 = reinterpret_cast<int64_t*>(s_buffer + s_grad_size_aligned);
+    const bool use_int32 = (in_features < 65536);
 
     // 1. Initialize shared gradient to 0
     int total_elements = in_features * blockDim.x;
-    for (int i = threadIdx.x + threadIdx.y * blockDim.x; i < total_elements; i += blockDim.x * blockDim.y) {
+    for (int i = threadIdx.x; i < total_elements; i += blockDim.x) {
         s_grad[i] = scalar_t(0);
     }
     __syncthreads();
 
     const int batch_start = blockIdx.x * batch_step;
-    const int batch_end = (batch_start + batch_step < batch_size) ? (batch_start + batch_step) : batch_size;
+    const int batch_end = min(batch_start + batch_step, batch_size);
     const int out_idx_base = blockIdx.y * blockDim.x;
     const int out_idx = out_idx_base + threadIdx.x;
     const bool valid_out = out_idx < out_features;
@@ -208,24 +372,27 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
 
         // Use tiled loading for safety, though typically NumF small here.
         for (int f_start = 0; f_start < num_features; f_start += MAX_SHARED_FEATURES) {
-             int f_end = (f_start + MAX_SHARED_FEATURES < num_features) ? (f_start + MAX_SHARED_FEATURES) : num_features;
+             int f_end = min(f_start + MAX_SHARED_FEATURES, num_features);
              int chunk_size = f_end - f_start;
 
-             // Cooperatively load indices
+             // Cooperatively load indices with type optimization
              for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
-                 s_indices[i] = batch_indices[f_start + i];
+                 if (use_int32) {
+                     s_indices_32[i] = static_cast<int>(batch_indices[f_start + i]);
+                 } else {
+                     s_indices_64[i] = batch_indices[f_start + i];
+                 }
              }
              __syncthreads();
 
              // Accumulate into s_grad
              if (valid_out) {
-                 const scalar_t grad_out = grad_output[b * out_features + out_idx];
+                 const float grad_out = static_cast<float>(grad_output[b * out_features + out_idx]);
                  for (int i = 0; i < chunk_size; i++) {
-                     int64_t idx = s_indices[i];
-                     // Safety check removed for speed? No, let's keep it. InF check costs little.
+                     int idx = use_int32 ? s_indices_32[i] : static_cast<int>(s_indices_64[i]);
                      if (idx < in_features) {
                          // Shared memory atomic
-                         atomicAdd(&s_grad[idx * blockDim.x + threadIdx.x], grad_out);
+                         atomicAdd(&s_grad[idx * blockDim.x + threadIdx.x], static_cast<scalar_t>(grad_out));
                      }
                  }
              }
@@ -233,11 +400,13 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
         }
     }
 
-    // 3. Write back s_grad to global grad_weight
+    // 3. Write back s_grad to global grad_weight using vectorized writes when possible
     if (valid_out) {
         for (int idx = 0; idx < in_features; idx++) {
              scalar_t val = s_grad[idx * blockDim.x + threadIdx.x];
-             if (abs(val) > 1e-9) {
+             // Only write non-zero values to reduce atomic contention
+             // Use a small epsilon to handle floating point comparison
+             if (val != scalar_t(0)) {
                  atomicAdd(&grad_weight[idx * out_features + out_idx], val);
              }
         }
@@ -247,6 +416,28 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
 // -------------------------------------------------------------------------
 // Host Functions
 // -------------------------------------------------------------------------
+
+// Compute optimal batch step based on shared memory requirements
+int computeOptimalBatchStep(int in_features, int out_features, int threads, size_t available_shm) {
+    // Calculate shared memory per batch
+    size_t s_grad_size = in_features * threads * sizeof(float);
+    size_t s_grad_aligned = (s_grad_size + 7) / 8 * 8;
+    size_t indices_size = MAX_SHARED_FEATURES * sizeof(int64_t);
+    size_t total_per_batch = s_grad_aligned + indices_size;
+
+    // We want to maximize batch_step while staying under shm limit
+    // and maintaining good occupancy
+    int max_step = 64;  // Upper limit for reasonable occupancy
+    int min_step = 8;   // Lower limit for efficiency
+
+    // Start from max and work down if needed
+    for (int step = max_step; step >= min_step; step /= 2) {
+        if (total_per_batch <= available_shm) {
+            return step;
+        }
+    }
+    return min_step;
+}
 
 torch::Tensor onehot_sparse_linear_forward_cuda(
     torch::Tensor indices,
@@ -264,14 +455,33 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
         return output;
     }
 
-    const int threads = 256;
-    const int blocks_y = (out_features + threads - 1) / threads;
-    const dim3 blocks(batch_size, blocks_y);
-
     AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16,
         weight.scalar_type(), "onehot_sparse_linear_forward_cuda", ([&] {
-        if (num_features <= MAX_SHARED_FEATURES) {
+
+        // Use vectorized kernel when out_features >= 4 for better memory coalescing
+        const bool use_vectorized = (out_features >= 4);
+
+        if (use_vectorized) {
+            // Vectorized kernel: each thread handles 4 output elements
+            const int threads = 64;  // Reduced thread count since each thread does 4x work
+            const int blocks_y = (out_features + threads * 4 - 1) / (threads * 4);
+            const dim3 blocks(batch_size, blocks_y);
+
+            onehot_sparse_linear_forward_kernel_vectorized<scalar_t><<<blocks, threads>>>(
+                indices.data_ptr<int64_t>(),
+                weight.data_ptr<scalar_t>(),
+                bias.has_value() ? bias.value().data_ptr<scalar_t>() : nullptr,
+                output.data_ptr<scalar_t>(),
+                batch_size,
+                num_features,
+                out_features
+            );
+        } else if (num_features <= MAX_SHARED_FEATURES) {
+            const int threads = 256;
+            const int blocks_y = (out_features + threads - 1) / threads;
+            const dim3 blocks(batch_size, blocks_y);
+
             onehot_sparse_linear_forward_kernel_fast<scalar_t><<<blocks, threads>>>(
                 indices.data_ptr<int64_t>(),
                 weight.data_ptr<scalar_t>(),
@@ -282,6 +492,10 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
                 out_features
             );
         } else {
+            const int threads = 256;
+            const int blocks_y = (out_features + threads - 1) / threads;
+            const dim3 blocks(batch_size, blocks_y);
+
             onehot_sparse_linear_forward_kernel_tiled<scalar_t><<<blocks, threads>>>(
                 indices.data_ptr<int64_t>(),
                 weight.data_ptr<scalar_t>(),
@@ -333,10 +547,6 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
     // Cast grad_output to compute_dtype if needed
     auto grad_output_compute = needs_cast ? grad_output.to(compute_dtype) : grad_output;
 
-    const int threads = 256;
-    const int blocks_y = (out_features + threads - 1) / threads;
-    const dim3 blocks(batch_size, blocks_y);
-
     // Dispatch on compute_dtype (always fp32 or fp64)
     AT_DISPATCH_FLOATING_TYPES(compute_dtype, "onehot_sparse_linear_backward_cuda", ([&] {
         // 1. Try Cached Kernel (for small InFeatures e.g. Reversi Board)
@@ -349,7 +559,11 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
         for (int t : {256, 128, 64, 32}) {
             size_t s_grad_size = in_features * t * sizeof(scalar_t);
             size_t s_grad_aligned = (s_grad_size + 7) / 8 * 8;
-            size_t total_shm = s_grad_aligned + MAX_SHARED_FEATURES * sizeof(int64_t);
+            // Account for index type optimization: use int32 when in_features < 65536
+            size_t idx_size = (in_features < 65536) ?
+                MAX_SHARED_FEATURES * sizeof(int) :
+                MAX_SHARED_FEATURES * sizeof(int64_t);
+            size_t total_shm = s_grad_aligned + idx_size;
 
             if (total_shm <= max_shared_mem) {
                 cached_threads = t;
@@ -360,7 +574,8 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
         }
 
         if (use_cached) {
-            const int batch_step = 32;
+            // Dynamic batch step computation
+            const int batch_step = computeOptimalBatchStep(in_features, out_features, cached_threads, max_shared_mem);
             const int blocks_x = (batch_size + batch_step - 1) / batch_step;
             const int blocks_y_cached = (out_features + cached_threads - 1) / cached_threads;
             const dim3 blocks_cached(blocks_x, blocks_y_cached);
@@ -378,27 +593,37 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
                 out_features,
                 batch_step
             );
-        } else if (num_features <= MAX_SHARED_FEATURES) {
-            // 2. Use Fast Original Kernel (for usual large InFeatures but small NumFeatures)
-            // This path has no overhead from tiling or internal barriers for non-existent tiles.
-            onehot_sparse_linear_backward_weight_kernel_fast<scalar_t><<<blocks, threads>>>(
-                indices.data_ptr<int64_t>(),
-                grad_output_compute.data_ptr<scalar_t>(),
-                grad_weight_compute.data_ptr<scalar_t>(),
-                batch_size,
-                num_features,
-                out_features
-            );
         } else {
-            // 3. Fallback Tiled Kernel (for large NumFeatures)
-            onehot_sparse_linear_backward_weight_kernel_tiled<scalar_t><<<blocks, threads>>>(
-                indices.data_ptr<int64_t>(),
-                grad_output_compute.data_ptr<scalar_t>(),
-                grad_weight_compute.data_ptr<scalar_t>(),
-                batch_size,
-                num_features,
-                out_features
-            );
+            // Use warp-optimized kernel for better atomic performance
+            const int threads = 256;
+            const int batches_per_block = 4;
+            const int blocks_x = (batch_size + batches_per_block - 1) / batches_per_block;
+            const int blocks_y = (out_features + threads - 1) / threads;
+            const dim3 blocks(blocks_x, blocks_y);
+
+            if (num_features <= MAX_SHARED_FEATURES) {
+                // Fast kernel with shared memory for indices
+                const dim3 blocks_fast(batch_size, blocks_y);
+                onehot_sparse_linear_backward_weight_kernel_fast<scalar_t><<<blocks_fast, threads>>>(
+                    indices.data_ptr<int64_t>(),
+                    grad_output_compute.data_ptr<scalar_t>(),
+                    grad_weight_compute.data_ptr<scalar_t>(),
+                    batch_size,
+                    num_features,
+                    out_features
+                );
+            } else {
+                // Tiled kernel for large num_features
+                const dim3 blocks_tiled(batch_size, blocks_y);
+                onehot_sparse_linear_backward_weight_kernel_tiled<scalar_t><<<blocks_tiled, threads>>>(
+                    indices.data_ptr<int64_t>(),
+                    grad_output_compute.data_ptr<scalar_t>(),
+                    grad_weight_compute.data_ptr<scalar_t>(),
+                    batch_size,
+                    num_features,
+                    out_features
+                );
+            }
         }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
     }));

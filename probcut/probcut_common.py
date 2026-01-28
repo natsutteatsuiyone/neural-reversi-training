@@ -18,13 +18,17 @@ def build_features(df: pd.DataFrame) -> np.ndarray:
     deep = df["deep_depth"].to_numpy(dtype=np.int64)
     sd = shallow.astype(float)
     dd = deep.astype(float)
-    return np.column_stack([
-        sd,
-        dd,
-    ])
+    return np.column_stack(
+        [
+            sd,
+            dd,
+        ]
+    )
 
 
-def oof_predictions_linreg(X: np.ndarray, y: np.ndarray, n_splits: int, seed: int) -> np.ndarray:
+def oof_predictions_linreg(
+    X: np.ndarray, y: np.ndarray, n_splits: int, seed: int
+) -> np.ndarray:
     """Compute out-of-fold linear regression predictions to avoid leakage."""
     n_samples = X.shape[0]
     if n_samples < 2:
@@ -39,14 +43,18 @@ def oof_predictions_linreg(X: np.ndarray, y: np.ndarray, n_splits: int, seed: in
     return y_oof
 
 
-def smoothed_local_mae(sd: np.ndarray, dd: np.ndarray, abs_resid: np.ndarray, alpha: float) -> np.ndarray:
+def smoothed_local_mae(
+    sd: np.ndarray, dd: np.ndarray, abs_resid: np.ndarray, alpha: float
+) -> np.ndarray:
     """Compute a smoothed local MAE for each (shallow_depth, deep_depth) bucket."""
     g = pd.DataFrame({"sd": sd, "dd": dd, "abs": abs_resid})
     grp = g.groupby(["sd", "dd"])
     mean_by_key = grp["abs"].transform("mean")
     count_by_key = grp["abs"].transform("count").astype(float)
     global_abs = g["abs"].mean()
-    smoothed = (mean_by_key * count_by_key + alpha * global_abs) / (count_by_key + alpha)
+    smoothed = (mean_by_key * count_by_key + alpha * global_abs) / (
+        count_by_key + alpha
+    )
     return smoothed.to_numpy()
 
 
@@ -73,9 +81,11 @@ def fit_probcut_models(
     log_std_targets = np.log(std_targets + epsilon)
 
     # Step 3: predict log sigma out-of-fold and reuse it as weights
-    log_sigma_oof = oof_predictions_linreg(X, log_std_targets, n_splits=n_splits, seed=seed)
+    log_sigma_oof = oof_predictions_linreg(
+        X, log_std_targets, n_splits=n_splits, seed=seed
+    )
     sigma_oof = np.exp(log_sigma_oof)
-    var_pred = np.maximum(sigma_oof ** 2, 1e-12)
+    var_pred = np.maximum(sigma_oof**2, 1e-12)
     w = 1.0 / var_pred
     sw = np.sqrt(w)
     Xw = X * sw[:, None]
@@ -98,10 +108,18 @@ def format_float(x: float) -> str:
 
 def add_training_cli_arguments(parser: argparse.ArgumentParser) -> None:
     """Add CLI flags shared by the ProbCut training scripts."""
-    parser.add_argument("--folds", type=int, default=5, help="K-fold for OOF residuals.")
-    parser.add_argument("--alpha", type=float, default=5.0, help="Smoothing strength for local MAE.")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for KFold shuffling.")
-    parser.add_argument("--epsilon", type=float, default=1e-8, help="Stability constant for log std.")
+    parser.add_argument(
+        "--folds", type=int, default=5, help="K-fold for OOF residuals."
+    )
+    parser.add_argument(
+        "--alpha", type=float, default=5.0, help="Smoothing strength for local MAE."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Random seed for KFold shuffling."
+    )
+    parser.add_argument(
+        "--epsilon", type=float, default=1e-8, help="Stability constant for log std."
+    )
 
 
 def validate_dataframe(df: pd.DataFrame, required_columns: Collection[str]) -> None:
@@ -120,7 +138,9 @@ def validate_dataframe(df: pd.DataFrame, required_columns: Collection[str]) -> N
         raise ValueError("deep_depth must be >= shallow_depth.")
 
 
-def load_dataframe(csv_path: Path | str, required_columns: Collection[str]) -> pd.DataFrame:
+def load_dataframe(
+    csv_path: Path | str, required_columns: Collection[str]
+) -> pd.DataFrame:
     """Load a CSV file and run shared validation checks."""
     path = Path(csv_path)
     if not path.exists():

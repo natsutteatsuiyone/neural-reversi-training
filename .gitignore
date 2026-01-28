@@ -44,3 +44,8 @@ GEMINI.md
 sparse_linear/build/
 sparse_linear/*.egg-info/
 sparse_linear/_C*.so
+
+# Feature dataset build artifacts
+feature_dataset/build/
+feature_dataset/*.egg-info/
+feature_dataset/_C*.so
