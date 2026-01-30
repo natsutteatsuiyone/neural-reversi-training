@@ -9,15 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 import lightning as L
 
-# Try to import C++ implementation, fall back to Python
-try:
-    from feature_dataset import FeatureDataset, custom_collate_fn
-
-    _USE_CPP_DATASET = True
-except ImportError:
-    from training.dataset import FeatureDataset, custom_collate_fn
-
-    _USE_CPP_DATASET = False
+from dataset import BinDataset, custom_collate_fn
 
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.callbacks import ModelCheckpoint
@@ -26,7 +18,6 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from models import model_lg
 from models import model_sm
 from models import model_wasm
-from models import model_common
 
 
 def parse_args() -> argparse.Namespace:
@@ -47,7 +38,7 @@ def parse_args() -> argparse.Namespace:
         "--batch_size",
         type=int,
         default=65536,
-        help="Batch size (applied inside FeatureDataset)",
+        help="Batch size (applied inside BinDataset)",
     )
     parser.add_argument(
         "--num_workers",
@@ -100,11 +91,6 @@ def parse_args() -> argparse.Namespace:
         default="large",
         help="Model architecture to train",
     )
-    parser.add_argument(
-        "--use_python_dataset",
-        action="store_true",
-        help="Force use of Python dataset implementation instead of C++",
-    )
     args = parser.parse_args()
     return args
 
@@ -140,17 +126,17 @@ def prepare_dataloaders(
     num_workers: int,
     file_usage_ratio: float,
     shuffle: bool,
+    seed: int,
 ) -> tuple:
-    train_files = [str(p) for p in Path(train_dir).glob("*.zst")]
-    val_files = [str(p) for p in Path(val_dir).glob("*.zst")]
+    train_files = [str(p) for p in Path(train_dir).glob("*.bin")]
+    val_files = [str(p) for p in Path(val_dir).glob("*.bin")]
 
-    train_dataset = FeatureDataset(
+    train_dataset = BinDataset(
         filepaths=train_files,
         batch_size=batch_size,
         file_usage_ratio=file_usage_ratio,
-        num_features=model_common.NUM_FEATURES,
-        num_feature_params=model_common.NUM_FEATURE_PARAMS,
         shuffle=shuffle,
+        seed=seed,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -160,13 +146,12 @@ def prepare_dataloaders(
         pin_memory=True,
     )
 
-    val_dataset = FeatureDataset(
+    val_dataset = BinDataset(
         filepaths=val_files,
         batch_size=batch_size,
         file_usage_ratio=1.0,
-        num_features=model_common.NUM_FEATURES,
-        num_feature_params=model_common.NUM_FEATURE_PARAMS,
         shuffle=False,
+        seed=seed,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -186,6 +171,7 @@ def prepare_callbacks(model_variant: str) -> tuple:
 
     checkpoint_callback = ModelCheckpoint(
         save_top_k=32,
+        save_last=False,
         monitor="val_loss",
         mode="min",
         dirpath=dirpath,
@@ -231,18 +217,8 @@ def build_reversi_model(args) -> L.LightningModule:
 
 
 def main():
-    global FeatureDataset, custom_collate_fn
-
     args = parse_args()
     model_variant = args.model_variant
-
-    # Handle dataset implementation selection
-    if args.use_python_dataset or not _USE_CPP_DATASET:
-        from training.dataset import FeatureDataset, custom_collate_fn
-
-        print("Using Python dataset implementation")
-    else:
-        print("Using C++ dataset implementation")
 
     L.seed_everything(args.seed, workers=True)
 
@@ -253,6 +229,7 @@ def main():
         args.num_workers,
         args.file_usage_ratio,
         args.shuffle,
+        args.seed,
     )
 
     reversi_model = build_reversi_model(args)

@@ -70,9 +70,10 @@ class PhaseAdaptiveInput(nn.Module):
         flat_ply = ply.view(-1)
         batch_size = flat_ply.size(0)
         ls_indices = flat_ply // self.bucket_size
-        offsets = torch.arange(
-            batch_size, device=flat_ply.device, dtype=torch.long
-        ) * self.count
+        offsets = (
+            torch.arange(batch_size, device=flat_ply.device, dtype=torch.long)
+            * self.count
+        )
         return ls_indices + offsets
 
     def _select_bucket(

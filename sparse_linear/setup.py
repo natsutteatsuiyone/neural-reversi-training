@@ -9,7 +9,7 @@ setup(
     version='0.1.0',
     packages=['sparse_linear'],
     package_dir={'sparse_linear': str(HERE)},
-    python_requires='>=3.10',
+    python_requires='>=3.14',
     ext_modules=[
         CUDAExtension(
             name='sparse_linear._C',

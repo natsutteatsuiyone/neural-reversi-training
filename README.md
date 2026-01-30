@@ -30,15 +30,13 @@ Build the custom sparse linear CUDA extension:
 uv run python sparse_linear/setup.py build_ext --inplace
 ```
 
-### 4. Build Feature Dataset Extension (Optional, Recommended)
+### 4. Build Dataset Extension
 
-Build the C++ extension for faster data loading (~1.6x speedup):
+Build the C++ extension for data loading:
 
 ```bash
-uv run python feature_dataset/setup.py build_ext --inplace
+uv run python dataset/setup.py build_ext --inplace
 ```
-
-The training script will automatically use the C++ implementation if available.
 
 ### 5. Optional: NVIDIA Apex (Recommended for Performance)
 
@@ -73,22 +71,21 @@ uv run scripts/train.py --train_data ./data/train --val_data ./data/val --resume
 ### Command Line Arguments
 
 **Required:**
-- `--train_data`: Path to training data (*.zst)
-- `--val_data`: Path to validation data (*.zst)
+- `--train_data`: Path to training data (*.bin)
+- `--val_data`: Path to validation data (*.bin)
 
 **Optional:**
-- `--batch_size`: Training batch size (default: 16384)
-- `--num_workers`: Data loading workers (default: 4)
-- `--epochs`: Maximum epochs (default: 300)
-- `--seed`: Random seed (default: 42)
+- `--batch_size`: Training batch size
+- `--num_workers`: Data loading workers
+- `--epochs`: Maximum epochs
+- `--seed`: Random seed
 - `--resume_from_checkpoint`: Checkpoint path to resume training
 - `--resume_from_weights`: Weight file path to resume training
-- `--lr`: Learning rate (default: 0.001)
-- `--shuffle`: Shuffle the dataset (default: True)
-- `--weight_decay`: Weight decay for optimizer (default: 0.01)
-- `--file_usage_ratio`: Ratio of files to use per epoch (default: 1.0)
-- `--model_variant`: Model architecture to train: `large` (default), `small`, or `wasm` (the previous `--small` flag maps to `--model_variant small`)
-- `--use_python_dataset`: Force use of Python dataset implementation instead of C++
+- `--lr`: Learning rate
+- `--shuffle`: Shuffle the dataset
+- `--weight_decay`: Weight decay for optimizer
+- `--file_usage_ratio`: Ratio of files to use per epoch
+- `--model_variant`: Model architecture to train: `large`, `small`, or `wasm`
 
 ### Output
 
@@ -154,7 +151,7 @@ The output is Rust code printed to stdout that can be copied into the Neural Rev
 
 ## Preparing Training Data
 
-Refer to [neural-reversi/datagen](https://github.com/natsutteatsuiyone/neural-reversi/tree/main/datagen).
+Training data is generated through self-play using the datagen tool. See [neural-reversi/datagen](https://github.com/natsutteatsuiyone/neural-reversi/tree/main/datagen) for details.
 
 ## License
 

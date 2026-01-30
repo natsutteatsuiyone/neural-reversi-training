@@ -1,15 +1,13 @@
 import torch
-import torch.nn as nn
 import time
 import sys
 import os
 
-# Add parent directory to path to allow importing sparse_linear
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from sparse_linear import SparseLinear
 
-device = None # Declare device globally
+device = None
 
 def run_benchmark(name, in_features, num_features, batch_size=1024*16):
     print(f"\n=== Benchmark: {name} ===")
@@ -18,10 +16,11 @@ def run_benchmark(name, in_features, num_features, batch_size=1024*16):
 
     layer = SparseLinear(in_features, out_features, bias=True).to(device)
 
-    # Simulate High Contention
-    # Create pool of repeated indices
+    # Simulate high contention: in Reversi training, many board positions share similar
+    # feature patterns, leading to repeated weight updates (atomic conflicts) during backward
     pool_size = 1000
-    if pool_size > in_features: pool_size = in_features
+    if pool_size > in_features:
+        pool_size = in_features
 
     indices_pool = torch.randint(0, in_features, (pool_size, num_features), device=device, dtype=torch.int64)
     indices = indices_pool[torch.randint(0, pool_size, (batch_size,), device=device)]
@@ -78,7 +77,7 @@ def run_benchmark(name, in_features, num_features, batch_size=1024*16):
     torch.cuda.synchronize()
     native_time = (time.time() - start) / 100 * 1000
     print(f"Native index_add_ time: {native_time:.3f} ms")
-    print(f"Speedup vs Custom: {bwd_time / native_time:.2f}x")
+    print(f"Custom vs Native: {native_time / bwd_time:.2f}x speedup")
 
     return fwd_time, bwd_time
 

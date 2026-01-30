@@ -24,15 +24,6 @@ __device__ __forceinline__ T warpReduceSum(T val) {
     return val;
 }
 
-// Check if value is the first occurrence in warp for given key
-__device__ __forceinline__ bool isFirstInWarp(int64_t key, int lane_id) {
-    // Broadcast key to all lanes and check if this is the first occurrence
-    unsigned int match_mask = __match_any_sync(0xffffffff, key);
-    // Find the first lane with matching key
-    int first_lane = __ffs(match_mask) - 1;
-    return lane_id == first_lane;
-}
-
 // -------------------------------------------------------------------------
 // Forward Kernels
 // -------------------------------------------------------------------------
@@ -57,7 +48,6 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
 
     // Warp-level index sharing via shuffle
     const int lane_id = threadIdx.x & (WARP_SIZE - 1);
-    const int warp_id = threadIdx.x / WARP_SIZE;
 
     const int64_t* batch_indices = indices + batch_idx * num_features;
 
@@ -580,8 +570,20 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
             const int blocks_y_cached = (out_features + cached_threads - 1) / cached_threads;
             const dim3 blocks_cached(blocks_x, blocks_y_cached);
 
-            cudaFuncSetAttribute(onehot_sparse_linear_backward_cached_kernel<scalar_t>,
-                 cudaFuncAttributeMaxDynamicSharedMemorySize, (int)required_shm);
+            auto cuda_err = cudaFuncSetAttribute(onehot_sparse_linear_backward_cached_kernel<scalar_t>,
+                 cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(required_shm));
+            if (cuda_err != cudaSuccess) {
+                // Fall back to non-cached kernel path
+                use_cached = false;
+            }
+        }
+
+        if (use_cached) {
+            // Dynamic batch step computation (recalculate since use_cached may have changed)
+            const int batch_step = computeOptimalBatchStep(in_features, out_features, cached_threads, max_shared_mem);
+            const int blocks_x = (batch_size + batch_step - 1) / batch_step;
+            const int blocks_y_cached = (out_features + cached_threads - 1) / cached_threads;
+            const dim3 blocks_cached(blocks_x, blocks_y_cached);
 
             onehot_sparse_linear_backward_cached_kernel<scalar_t><<<blocks_cached, cached_threads, required_shm>>>(
                 indices.data_ptr<int64_t>(),

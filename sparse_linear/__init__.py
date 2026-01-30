@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+from torch import nn
 from typing import Optional
 
 from . import _C
@@ -70,8 +70,11 @@ class SparseLinear(nn.Module):
     Constraints:
         - **CUDA-only**: This layer requires CUDA tensors; CPU tensors are not supported.
         - **int64 indices**: Input indices must be of dtype torch.int64 (torch.long).
-        - **Performance Note**: The kernel is highly optimized for `num_features <= 128` (using register-based accumulation).
-          Larger feature counts are supported via a tiled implementation but may be slightly slower.
+        - **Valid indices**: All index values must be in range [0, in_features).
+          Out-of-bounds indices cause undefined behavior.
+        - **Performance Note**: The kernel uses shared memory index caching for `num_features <= 128`
+          and a vectorized implementation with register accumulation for `out_features >= 4`.
+          Larger feature counts use a tiled implementation.
         - **Compilation note**: When using --use_fast_math NVCC flag, floating-point
           operations may have reduced precision due to fast math optimizations.
 
@@ -126,7 +129,8 @@ class SparseLinear(nn.Module):
     def forward(self, indices: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            indices: [batch_size, num_features] tensor of feature indices (int64, CUDA)
+            indices: [batch_size, num_features] tensor of feature indices (int64, CUDA).
+                     All values must be in range [0, in_features).
 
         Returns:
             [batch_size, out_features] output tensor
