@@ -1,4 +1,5 @@
 #include <torch/extension.h>
+#include <ATen/Dispatch_v2.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -445,9 +446,8 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
         return output;
     }
 
-    AT_DISPATCH_FLOATING_TYPES_AND2(
-        at::ScalarType::Half, at::ScalarType::BFloat16,
-        weight.scalar_type(), "onehot_sparse_linear_forward_cuda", ([&] {
+    AT_DISPATCH_V2(
+        weight.scalar_type(), "onehot_sparse_linear_forward_cuda", AT_WRAP([&] {
 
         // Use vectorized kernel when out_features >= 4 for better memory coalescing
         const bool use_vectorized = (out_features >= 4);
@@ -497,7 +497,7 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
             );
         }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }));
+    }), AT_EXPAND(AT_FLOATING_TYPES), at::kHalf, at::kBFloat16);
 
     return output;
 }
@@ -538,7 +538,7 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
     auto grad_output_compute = needs_cast ? grad_output.to(compute_dtype) : grad_output;
 
     // Dispatch on compute_dtype (always fp32 or fp64)
-    AT_DISPATCH_FLOATING_TYPES(compute_dtype, "onehot_sparse_linear_backward_cuda", ([&] {
+    AT_DISPATCH_V2(compute_dtype, "onehot_sparse_linear_backward_cuda", AT_WRAP([&] {
         // 1. Try Cached Kernel (for small InFeatures e.g. Reversi Board)
         // Only use if ALL shared memory requirements fit freely.
         bool use_cached = false;
@@ -628,7 +628,7 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
             }
         }
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-    }));
+    }), AT_EXPAND(AT_FLOATING_TYPES));
 
     // Cast back to original dtype if needed
     auto grad_weight = needs_cast ? grad_weight_compute.to(weight.scalar_type()) : grad_weight_compute;
