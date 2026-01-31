@@ -13,6 +13,7 @@ from models.model_common import (
     BaseLitReversiModel,
     QuantizationConfig,
     WeightClipConfig,
+    screlu,
 )
 from models.stacked_linear import StackedLinear
 from sparse_linear import SparseLinear
@@ -71,7 +72,7 @@ class ReversiWasmModel(nn.Module):
         self.weight_scale_out = config.eval_score_scale * 128.0  # WASM-specific
         self.quantized_one = config.quantized_one
 
-        self.max_input_weight = 127.0 / config.quantized_one
+        self.max_input_weight = config.quantized_weight_max / config.quantized_one
 
         # Feature offset buffer for converting raw indices to absolute indices
         self.register_buffer(
@@ -92,12 +93,12 @@ class ReversiWasmModel(nn.Module):
         feature_indices = feature_indices + self.feature_offsets
 
         x = self.input(feature_indices)
-        x = x.clamp(0.0, 1.0).pow(2.0) * (255.0 / 256.0)
+        x = screlu(x, self.config.activation_scale)
         return self.layer_stacks(x, ply)
 
 
 class LitReversiWasmModel(BaseLitReversiModel):
-    """Lightning wrapper for ReversiWasmModel with quantization-aware weight clipping."""
+    """Lightning wrapper for ReversiWasmModel."""
 
     def __init__(
         self,

@@ -84,7 +84,7 @@ class ReversiSmallModel(nn.Module):
             count=NUM_PA_BUCKETS,
             output_dim=LPA,
             max_ply=MAX_PLY,
-            activation_scale=1023 / 1024,
+            activation_scale=config.activation_scale,
         )
         self.layer_stacks = LayerStacks(NUM_LS_BUCKETS)
 

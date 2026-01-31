@@ -14,6 +14,7 @@ from models.model_common import (
     ParamGroup,
     QuantizationConfig,
     WeightClipConfig,
+    screlu,
 )
 from models.phase_adaptive_input import PhaseAdaptiveInput
 from models.stacked_linear import StackedLinear
@@ -36,12 +37,17 @@ MAX_PLY = 60
 
 
 class LayerStacks(nn.Module):
-    """Phase-bucketed layer stacks (L1 -> L2 -> output) with ply-dependent weights."""
+    """Phase-bucketed layer stacks with skip connections.
 
-    def __init__(self, count: int) -> None:
+    Architecture: inputs -> L1 -> L2 -> concat(L2, original_inputs) -> output
+    All layers use ply-dependent weights selected by phase bucket.
+    """
+
+    def __init__(self, count: int, activation_scale: float) -> None:
         super().__init__()
         self.count = count
         self.bucket_size = MAX_PLY // count
+        self.activation_scale = activation_scale
 
         # Use StackedLinear for all phase-bucketed layers
         self.l1_base = StackedLinear(L1_BASE, L2_HALF, count)
@@ -49,7 +55,6 @@ class LayerStacks(nn.Module):
         self.l2 = StackedLinear(L2 * 2, L3, count)
         self.output = StackedLinear(LOUTPUT, 1, count)
 
-        # Zero output bias for stable initialization
         with torch.no_grad():
             self.output.linear.bias.zero_()
 
@@ -62,26 +67,21 @@ class LayerStacks(nn.Module):
     ) -> torch.Tensor:
         ls_indices = ply.view(-1) // self.bucket_size
 
-        # Add mobility features
         mobility_scaled = torch.clamp(mobility * (7.0 / 255.0), max=1.0)
         x_base_with_mobility = torch.cat([x_base, mobility_scaled], dim=1)
         x_pa_with_mobility = torch.cat([x_pa, mobility_scaled], dim=1)
 
-        # Process base and PA features through L1
         l1x_base = self.l1_base(x_base_with_mobility, ls_indices)
         l1x_pa = self.l1_pa(x_pa_with_mobility, ls_indices)
 
-        # Combine and apply activations
         l1x = torch.cat([l1x_base, l1x_pa], dim=1)
-        l1x_squared = l1x.pow(2) * (255 / 256)
+        l1x_squared = l1x.pow(2) * self.activation_scale
         l1x = torch.cat([l1x_squared, l1x], dim=1)
         l1x = torch.clamp(l1x, 0.0, 1.0)
 
-        # Second layer
         l2x = self.l2(l1x, ls_indices)
-        l2x = torch.clamp(l2x, 0.0, 1.0).pow(2) * (255 / 256)
+        l2x = screlu(l2x, self.activation_scale)
 
-        # Output layer
         output_features = torch.cat([l2x, x_base, x_pa], dim=1)
         output = self.output(output_features, ls_indices)
 
@@ -116,7 +116,6 @@ class ReversiModel(nn.Module):
         self.quantized_weight_max = config.quantized_weight_max
         self.max_hidden_weight = config.max_hidden_weight
 
-        # Feature offset buffer for converting raw indices to absolute indices
         self.register_buffer(
             "feature_offsets",
             torch.tensor(FEATURE_CUM_OFFSETS, dtype=torch.int64),
@@ -129,9 +128,9 @@ class ReversiModel(nn.Module):
             count=NUM_PA_BUCKETS,
             output_dim=LPA,
             max_ply=MAX_PLY,
-            activation_scale=255 / 256,
+            activation_scale=config.activation_scale,
         )
-        self.layer_stacks = LayerStacks(NUM_LS_BUCKETS)
+        self.layer_stacks = LayerStacks(NUM_LS_BUCKETS, config.activation_scale)
 
     def forward(
         self,
@@ -141,25 +140,20 @@ class ReversiModel(nn.Module):
     ) -> torch.Tensor:
         feature_indices = feature_indices + self.feature_offsets
 
-        # Base input processing
         x_base = self.base_input(feature_indices)
         x_base1, x_base2 = torch.split(x_base, LBASE // 2, dim=1)
 
-        # Apply different activations to each half
         x_base1 = torch.clamp(x_base1, 0.0, 1.0)
         x_base2 = torch.clamp(x_base2, 0.0, 1.0)
+        x_base = x_base1 * x_base2 * self.config.activation_scale
 
-        # Combine
-        x_base = x_base1 * x_base2 * (255 / 256)
-
-        # Phase-adaptive input
         x_pa = self.pa_input(feature_indices, ply)
 
         return self.layer_stacks(x_base, x_pa, mobility, ply)
 
 
 class LitReversiModel(BaseLitReversiModel):
-    """Lightning wrapper for ReversiModel with quantization-aware weight clipping."""
+    """Lightning wrapper for ReversiModel."""
 
     def __init__(
         self,
@@ -172,19 +166,14 @@ class LitReversiModel(BaseLitReversiModel):
 
         self.model = ReversiModel()
         max_weight = self.model.max_hidden_weight
+        layer_stacks = self.model.layer_stacks
         self.weight_clipping = [
             WeightClipConfig(
-                params=[self.model.layer_stacks.l1_base.linear.weight],
-                min_weight=-max_weight,
-                max_weight=max_weight,
-            ),
-            WeightClipConfig(
-                params=[self.model.layer_stacks.l1_pa.linear.weight],
-                min_weight=-max_weight,
-                max_weight=max_weight,
-            ),
-            WeightClipConfig(
-                params=[self.model.layer_stacks.l2.linear.weight],
+                params=[
+                    layer_stacks.l1_base.linear.weight,
+                    layer_stacks.l1_pa.linear.weight,
+                    layer_stacks.l2.linear.weight,
+                ],
                 min_weight=-max_weight,
                 max_weight=max_weight,
             ),

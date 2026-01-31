@@ -86,6 +86,15 @@ class QuantizationConfig:
         """Compute maximum allowed hidden weight value before clipping."""
         return self.quantized_weight_max / self.weight_scale_hidden
 
+    @property
+    def activation_scale(self) -> float:
+        """Scale for squared activations: quantized_one / (quantized_one + 1).
+
+        Compensates for using /256 (bit shift) instead of /255 in quantized
+        multiplication: (a*255)*(b*255) requires /255, but /256 is faster.
+        """
+        return self.quantized_one / (self.quantized_one + 1)
+
 
 @dataclass
 class WeightClipConfig:
@@ -97,6 +106,11 @@ class WeightClipConfig:
 
 
 ParamGroup = dict[str, Any]
+
+
+def screlu(x: torch.Tensor, scale: float) -> torch.Tensor:
+    """Squared Clipped ReLU activation: clamp(x, 0, 1)^2 * scale."""
+    return x.clamp(0.0, 1.0).pow(2) * scale
 
 
 def create_optimizer_with_scheduler(

@@ -9,20 +9,13 @@ import torch.nn as nn
 class StackedLinear(nn.Module):
     """Stacked linear layer for phase-bucketed processing.
 
-    This module combines multiple linear layers with the same input/output
-    dimensions into a single layer, selecting the appropriate output based
-    on bucket indices. This pattern is inspired by Stockfish NNUE.
+    This module maintains `count` independent linear layers (stacks) and applies
+    a specific stack to each input sample based on the provided bucket index.
 
     Args:
         in_features: Size of each input sample.
         out_features: Size of each output sample.
         count: Number of stacked layers (buckets).
-
-    Example:
-        >>> layer = StackedLinear(128, 64, count=6)
-        >>> x = torch.randn(32, 128)  # batch of 32
-        >>> indices = torch.randint(0, 6, (32,))  # bucket for each sample
-        >>> output = layer(x, indices)  # (32, 64)
     """
 
     def __init__(self, in_features: int, out_features: int, count: int) -> None:
@@ -44,15 +37,7 @@ class StackedLinear(nn.Module):
         self.linear.bias.copy_(init_bias.repeat(self.count))
 
     def forward(self, x: torch.Tensor, ls_indices: torch.Tensor) -> torch.Tensor:
-        """Forward pass with bucket selection.
-
-        Args:
-            x: Input tensor of shape (batch, in_features).
-            ls_indices: Bucket indices of shape (batch,).
-
-        Returns:
-            Output tensor of shape (batch, out_features).
-        """
+        """Forward pass with bucket selection."""
         stacked_output = self.linear(x)
         return self._select_output(stacked_output, ls_indices)
 
@@ -68,20 +53,13 @@ class StackedLinear(nn.Module):
             self.count,
             device=stacked_output.device,
         )
-        indices = ls_indices.flatten() + idx_offset
+        indices = ls_indices + idx_offset
 
         return reshaped_output[indices]
 
     @torch.no_grad()
     def at_index(self, index: int) -> nn.Linear:
-        """Extract a single stack as an independent nn.Linear module.
-
-        Args:
-            index: Stack index to extract.
-
-        Returns:
-            nn.Linear module with weights from the specified stack.
-        """
+        """Extract a single stack as an independent nn.Linear module."""
         layer = nn.Linear(self.in_features, self.out_features)
 
         begin = index * self.out_features
