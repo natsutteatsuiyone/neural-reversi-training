@@ -1,4 +1,4 @@
-"""WASM model (ReversiWasmlModel) serialization writer."""
+"""WASM model (ReversiWasmModel) serialization writer."""
 
 from typing import Any
 
@@ -10,10 +10,10 @@ from models.serialization.serialize_common import BaseNNWriter, quantize_tensor
 
 
 class WasmNNWriter(BaseNNWriter):
-    """Serialize ``ReversiWasmlModel`` instances into the binary format."""
+    """Serialize ``ReversiWasmModel`` instances into the binary format."""
 
     def __init__(
-        self, model: model_wasm.ReversiWasmlModel, show_hist: bool = True
+        self, model: model_wasm.ReversiWasmModel, show_hist: bool = True
     ) -> None:
         super().__init__(show_hist)
         self.write_model(model)
@@ -24,7 +24,7 @@ class WasmNNWriter(BaseNNWriter):
         for output in model.layer_stacks.get_layer_stacks():
             self.write_fc_layer(model, output)
 
-    def write_input_layer(self, model: model_wasm.ReversiWasmlModel) -> None:
+    def write_input_layer(self, model: model_wasm.ReversiWasmModel) -> None:
         """Write the input layer to the buffer."""
         bias = quantize_tensor(model.input.bias, model.quantized_one, torch.int16)
         weight = model.input.weight.clamp(
@@ -35,7 +35,7 @@ class WasmNNWriter(BaseNNWriter):
 
     def write_fc_layer(
         self,
-        model: model_wasm.ReversiWasmlModel,
+        model: model_wasm.ReversiWasmModel,
         layer: nn.Module,
     ) -> None:
         """Write a fully connected layer to the buffer."""
