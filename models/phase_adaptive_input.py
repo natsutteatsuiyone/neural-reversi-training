@@ -88,6 +88,6 @@ class PhaseAdaptiveInput(nn.Module):
             with torch.no_grad():
                 layer = nn.Linear(SUM_OF_FEATURES, self.output_dim)
                 start, end = i * self.output_dim, (i + 1) * self.output_dim
-                layer.weight.data = self.input.weight[:, start:end].t()
+                layer.weight.data = self.input.weight[:, start:end]
                 layer.bias.data = self.input.bias[start:end]
                 yield layer
