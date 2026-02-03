@@ -205,71 +205,75 @@ bool BinDatasetReader::fill_worker_buffer(BinWorkerContext &ctx) {
 }
 
 std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx) {
-    if (!fill_worker_buffer(ctx)) {
-        return std::nullopt;
-    }
+    // Allocate output tensors once; reuse if we need to skip filtered chunks.
+    const auto bs = static_cast<int64_t>(batch_size_);
 
-    if (ctx.available_records() < batch_size_) {
-        return std::nullopt;
-    }
-
-    // Allocate output tensors
-    auto options_float = torch::TensorOptions().dtype(torch::kFloat32);
-    auto options_int64 = torch::TensorOptions().dtype(torch::kInt64);
-
-    torch::Tensor scores =
-        torch::empty({static_cast<int64_t>(batch_size_), 1}, options_float);
-    torch::Tensor features = torch::empty(
-        {static_cast<int64_t>(batch_size_), static_cast<int64_t>(NUM_FEATURES)},
-        options_int64);
-    torch::Tensor mobility =
-        torch::empty({static_cast<int64_t>(batch_size_), 1}, options_int64);
-    torch::Tensor ply =
-        torch::empty({static_cast<int64_t>(batch_size_), 1}, options_int64);
+    torch::Tensor scores = torch::empty({bs, 1}, torch::kFloat32);
+    torch::Tensor features =
+        torch::empty({bs, static_cast<int64_t>(NUM_FEATURES)}, torch::kInt64);
+    torch::Tensor mobility = torch::empty({bs, 1}, torch::kInt64);
+    torch::Tensor ply = torch::empty({bs, 1}, torch::kInt64);
 
     float *scores_ptr = scores.data_ptr<float>();
     int64_t *features_ptr = features.data_ptr<int64_t>();
     int64_t *mobility_ptr = mobility.data_ptr<int64_t>();
     int64_t *ply_ptr = ply.data_ptr<int64_t>();
 
-    // Process records with ply filtering
-    GameRecord *records = ctx.data_ptr();
-    size_t out_idx = 0;
-    size_t in_idx = 0;
+    size_t total_filtered = 0;
 
-    while (out_idx < batch_size_ && in_idx < ctx.available_records()) {
-        const GameRecord &record = records[in_idx++];
+    while (true) {
+        if (!fill_worker_buffer(ctx)) {
+            if (total_filtered > 0) {
+                fprintf(stderr,
+                        "Warning: %zu records scanned but none matched ply "
+                        "range [%u, %u]\n",
+                        total_filtered, ply_min_, ply_max_);
+            }
+            return std::nullopt;
+        }
 
-        // Apply ply filter
-        if (record.ply < ply_min_ || record.ply > ply_max_) {
+        // Process records with ply filtering
+        GameRecord *records = ctx.data_ptr();
+        size_t out_idx = 0;
+        size_t in_idx = 0;
+
+        while (out_idx < batch_size_ && in_idx < ctx.available_records()) {
+            const GameRecord &record = records[in_idx++];
+
+            if (record.ply < ply_min_ || record.ply > ply_max_) {
+                continue;
+            }
+
+            process_game_record(record, ctx.rng,
+                                scores_ptr + out_idx,
+                                features_ptr + out_idx * NUM_FEATURES,
+                                mobility_ptr + out_idx,
+                                ply_ptr + out_idx);
+            ++out_idx;
+        }
+
+        ctx.consume(in_idx);
+
+        // If this chunk had no records in range, try the next chunk instead of
+        // signaling end-of-data.
+        if (out_idx == 0) {
+            total_filtered += in_idx;
+            if (shutdown_) {
+                return std::nullopt;
+            }
             continue;
         }
 
-        process_game_record(record, ctx.rng,
-                            scores_ptr + out_idx,
-                            features_ptr + out_idx * NUM_FEATURES,
-                            mobility_ptr + out_idx,
-                            ply_ptr + out_idx);
-        ++out_idx;
-    }
-
-    ctx.consume(in_idx);
-
-    // If we didn't fill the batch due to ply filtering, try to get more data
-    if (out_idx < batch_size_) {
-        // Recursively try to fill more (simplified approach: just return partial)
-        // For production, we would loop until batch is full or no more data
-        if (out_idx == 0) {
-            return std::nullopt;
+        if (out_idx < batch_size_) {
+            const auto n = static_cast<int64_t>(out_idx);
+            scores = scores.slice(0, 0, n);
+            features = features.slice(0, 0, n);
+            mobility = mobility.slice(0, 0, n);
+            ply = ply.slice(0, 0, n);
         }
-        // Resize tensors to actual size
-        scores = scores.slice(0, 0, static_cast<int64_t>(out_idx));
-        features = features.slice(0, 0, static_cast<int64_t>(out_idx));
-        mobility = mobility.slice(0, 0, static_cast<int64_t>(out_idx));
-        ply = ply.slice(0, 0, static_cast<int64_t>(out_idx));
-    }
 
-    return std::make_tuple(scores, features, mobility, ply);
+        return std::make_tuple(scores, features, mobility, ply);
+    }
 }
 
 void BinDatasetReader::worker_loop(size_t worker_id) {
