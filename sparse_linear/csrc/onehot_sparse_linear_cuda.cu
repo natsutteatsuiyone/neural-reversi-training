@@ -55,9 +55,12 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
 
     const int64_t* batch_indices = indices + batch_idx * num_features;
 
-    // Check if we can use float4 vector loads (float type + aligned out_features)
+    // Check if we can use float4 vector loads (float type + 16-byte aligned pointers)
     constexpr bool is_float = std::is_same_v<scalar_t, float>;
-    const bool aligned4 = (out_features % 4 == 0);
+    const bool aligned4 = (out_features % 4 == 0)
+        && (reinterpret_cast<uintptr_t>(weight) % sizeof(float4) == 0)
+        && (reinterpret_cast<uintptr_t>(output) % sizeof(float4) == 0)
+        && (!bias || reinterpret_cast<uintptr_t>(bias) % sizeof(float4) == 0);
 
     // Initialize sum with bias
     float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
