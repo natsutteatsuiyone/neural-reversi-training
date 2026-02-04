@@ -1,8 +1,11 @@
 #include <torch/extension.h>
 #include <ATen/Dispatch_v2.h>
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <type_traits>
 
 // Maximum number of features that can be cached in shared memory
 // Set to 128 to cover typical use cases (e.g., 64 for Reversi) with some headroom
@@ -52,20 +55,35 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
 
     const int64_t* batch_indices = indices + batch_idx * num_features;
 
+    // Check if we can use float4 vector loads (float type + aligned out_features)
+    constexpr bool is_float = std::is_same_v<scalar_t, float>;
+    const bool aligned4 = (out_features % 4 == 0);
+
     // Initialize sum with bias
     float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
     if (bias && out_base + 3 < out_features) {
-        // Vectorized bias load
-        sum.x = static_cast<float>(bias[out_base]);
-        sum.y = static_cast<float>(bias[out_base + 1]);
-        sum.z = static_cast<float>(bias[out_base + 2]);
-        sum.w = static_cast<float>(bias[out_base + 3]);
+        if constexpr (is_float) {
+            if (aligned4) {
+                float4 b4 = __ldg(reinterpret_cast<const float4*>(bias + out_base));
+                sum = b4;
+            } else {
+                sum.x = __ldg(&bias[out_base]);
+                sum.y = __ldg(&bias[out_base + 1]);
+                sum.z = __ldg(&bias[out_base + 2]);
+                sum.w = __ldg(&bias[out_base + 3]);
+            }
+        } else {
+            sum.x = static_cast<float>(__ldg(&bias[out_base]));
+            sum.y = static_cast<float>(__ldg(&bias[out_base + 1]));
+            sum.z = static_cast<float>(__ldg(&bias[out_base + 2]));
+            sum.w = static_cast<float>(__ldg(&bias[out_base + 3]));
+        }
     } else if (bias) {
         // Handle edge case
-        if (out_base < out_features) sum.x = static_cast<float>(bias[out_base]);
-        if (out_base + 1 < out_features) sum.y = static_cast<float>(bias[out_base + 1]);
-        if (out_base + 2 < out_features) sum.z = static_cast<float>(bias[out_base + 2]);
-        if (out_base + 3 < out_features) sum.w = static_cast<float>(bias[out_base + 3]);
+        if (out_base < out_features) sum.x = static_cast<float>(__ldg(&bias[out_base]));
+        if (out_base + 1 < out_features) sum.y = static_cast<float>(__ldg(&bias[out_base + 1]));
+        if (out_base + 2 < out_features) sum.z = static_cast<float>(__ldg(&bias[out_base + 2]));
+        if (out_base + 3 < out_features) sum.w = static_cast<float>(__ldg(&bias[out_base + 3]));
     }
 
     // Process features using warp shuffle for index broadcast
@@ -74,7 +92,7 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
         int64_t my_idx = 0;
         int f_local = f_base + lane_id;
         if (f_local < num_features) {
-            my_idx = batch_indices[f_local];
+            my_idx = __ldg(&batch_indices[f_local]);
         }
 
         // Process indices from all lanes in warp
@@ -86,15 +104,30 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
             // Accumulate weight values
             const scalar_t* w_ptr = weight + idx * out_features + out_base;
             if (out_base + 3 < out_features) {
-                sum.x += static_cast<float>(w_ptr[0]);
-                sum.y += static_cast<float>(w_ptr[1]);
-                sum.z += static_cast<float>(w_ptr[2]);
-                sum.w += static_cast<float>(w_ptr[3]);
+                if constexpr (is_float) {
+                    if (aligned4) {
+                        float4 w4 = __ldg(reinterpret_cast<const float4*>(w_ptr));
+                        sum.x += w4.x;
+                        sum.y += w4.y;
+                        sum.z += w4.z;
+                        sum.w += w4.w;
+                    } else {
+                        sum.x += __ldg(&w_ptr[0]);
+                        sum.y += __ldg(&w_ptr[1]);
+                        sum.z += __ldg(&w_ptr[2]);
+                        sum.w += __ldg(&w_ptr[3]);
+                    }
+                } else {
+                    sum.x += static_cast<float>(__ldg(&w_ptr[0]));
+                    sum.y += static_cast<float>(__ldg(&w_ptr[1]));
+                    sum.z += static_cast<float>(__ldg(&w_ptr[2]));
+                    sum.w += static_cast<float>(__ldg(&w_ptr[3]));
+                }
             } else {
-                if (out_base < out_features) sum.x += static_cast<float>(w_ptr[0]);
-                if (out_base + 1 < out_features) sum.y += static_cast<float>(w_ptr[1]);
-                if (out_base + 2 < out_features) sum.z += static_cast<float>(w_ptr[2]);
-                if (out_base + 3 < out_features) sum.w += static_cast<float>(w_ptr[3]);
+                if (out_base < out_features) sum.x += static_cast<float>(__ldg(&w_ptr[0]));
+                if (out_base + 1 < out_features) sum.y += static_cast<float>(__ldg(&w_ptr[1]));
+                if (out_base + 2 < out_features) sum.z += static_cast<float>(__ldg(&w_ptr[2]));
+                if (out_base + 3 < out_features) sum.w += static_cast<float>(__ldg(&w_ptr[3]));
             }
         }
     }
@@ -102,10 +135,21 @@ __global__ void onehot_sparse_linear_forward_kernel_vectorized(
     // Write output
     scalar_t* out_ptr = output + batch_idx * out_features + out_base;
     if (out_base + 3 < out_features) {
-        out_ptr[0] = static_cast<scalar_t>(sum.x);
-        out_ptr[1] = static_cast<scalar_t>(sum.y);
-        out_ptr[2] = static_cast<scalar_t>(sum.z);
-        out_ptr[3] = static_cast<scalar_t>(sum.w);
+        if constexpr (is_float) {
+            if (aligned4) {
+                *reinterpret_cast<float4*>(out_ptr) = sum;
+            } else {
+                out_ptr[0] = sum.x;
+                out_ptr[1] = sum.y;
+                out_ptr[2] = sum.z;
+                out_ptr[3] = sum.w;
+            }
+        } else {
+            out_ptr[0] = static_cast<scalar_t>(sum.x);
+            out_ptr[1] = static_cast<scalar_t>(sum.y);
+            out_ptr[2] = static_cast<scalar_t>(sum.z);
+            out_ptr[3] = static_cast<scalar_t>(sum.w);
+        }
     } else {
         if (out_base < out_features) out_ptr[0] = static_cast<scalar_t>(sum.x);
         if (out_base + 1 < out_features) out_ptr[1] = static_cast<scalar_t>(sum.y);
@@ -135,15 +179,15 @@ __global__ void onehot_sparse_linear_forward_kernel_fast(
     // Load ALL indices (assumes num_features <= 128)
     const int64_t* batch_indices = indices + batch_idx * num_features;
     for (int i = threadIdx.x; i < num_features; i += blockDim.x) {
-        s_indices[i] = batch_indices[i];
+        s_indices[i] = __ldg(&batch_indices[i]);
     }
     __syncthreads();
 
     if (out_idx >= out_features) return;
 
-    float sum = bias ? static_cast<float>(bias[out_idx]) : 0.0f;
+    float sum = bias ? static_cast<float>(__ldg(&bias[out_idx])) : 0.0f;
     for (int f = 0; f < num_features; f++) {
-        sum += static_cast<float>(weight[s_indices[f] * out_features + out_idx]);
+        sum += static_cast<float>(__ldg(&weight[s_indices[f] * out_features + out_idx]));
     }
     output[batch_idx * out_features + out_idx] = static_cast<scalar_t>(sum);
 }
@@ -174,14 +218,14 @@ __global__ void onehot_sparse_linear_forward_kernel_tiled(
 
         const int64_t* batch_indices = indices + batch_idx * num_features;
         for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
-            s_indices[i] = batch_indices[f_start + i];
+            s_indices[i] = __ldg(&batch_indices[f_start + i]);
         }
         __syncthreads();
 
         if (out_idx < out_features) {
              for (int i = 0; i < chunk_size; i++) {
                  int64_t idx = s_indices[i];
-                 sum += static_cast<float>(weight[idx * out_features + out_idx]);
+                 sum += static_cast<float>(__ldg(&weight[idx * out_features + out_idx]));
              }
         }
         __syncthreads();
@@ -189,7 +233,7 @@ __global__ void onehot_sparse_linear_forward_kernel_tiled(
 
     if (out_idx < out_features) {
          if (bias) {
-             sum += static_cast<float>(bias[out_idx]);
+             sum += static_cast<float>(__ldg(&bias[out_idx]));
          }
          output[batch_idx * out_features + out_idx] = static_cast<scalar_t>(sum);
     }
@@ -225,7 +269,7 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_warp_optimized(
         if (batch_idx >= batch_size) break;
 
         const int64_t* batch_indices = indices + batch_idx * num_features;
-        const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
+        const float grad_out = static_cast<float>(__ldg(&grad_output[batch_idx * out_features + out_idx]));
 
         // Process features with warp shuffle for index broadcast
         for (int f_base = 0; f_base < num_features; f_base += WARP_SIZE) {
@@ -233,7 +277,7 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_warp_optimized(
             int64_t my_idx = -1;
             int f_local = f_base + lane_id;
             if (f_local < num_features) {
-                my_idx = batch_indices[f_local];
+                my_idx = __ldg(&batch_indices[f_local]);
             }
 
             // Process indices from all lanes in warp
@@ -269,13 +313,13 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_fast(
     // Load ALL indices (assumes num_features <= 128)
     const int64_t* batch_indices = indices + batch_idx * num_features;
     for (int i = threadIdx.x; i < num_features; i += blockDim.x) {
-        s_indices[i] = batch_indices[i];
+        s_indices[i] = __ldg(&batch_indices[i]);
     }
     __syncthreads();
 
     if (out_idx >= out_features) return;
 
-    const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
+    const float grad_out = static_cast<float>(__ldg(&grad_output[batch_idx * out_features + out_idx]));
     for (int f = 0; f < num_features; f++) {
         atomicAdd(&grad_weight[s_indices[f] * out_features + out_idx], static_cast<scalar_t>(grad_out));
     }
@@ -304,12 +348,12 @@ __global__ void onehot_sparse_linear_backward_weight_kernel_tiled(
 
         const int64_t* batch_indices = indices + batch_idx * num_features;
         for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
-            s_indices[i] = batch_indices[f_start + i];
+            s_indices[i] = __ldg(&batch_indices[f_start + i]);
         }
         __syncthreads();
 
         if (out_idx < out_features) {
-            const float grad_out = static_cast<float>(grad_output[batch_idx * out_features + out_idx]);
+            const float grad_out = static_cast<float>(__ldg(&grad_output[batch_idx * out_features + out_idx]));
             for (int i = 0; i < chunk_size; i++) {
                 int64_t idx = s_indices[i];
                 atomicAdd(&grad_weight[idx * out_features + out_idx], static_cast<scalar_t>(grad_out));
@@ -369,16 +413,16 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
              // Cooperatively load indices with type optimization
              for (int i = threadIdx.x; i < chunk_size; i += blockDim.x) {
                  if (use_int32) {
-                     s_indices_32[i] = static_cast<int>(batch_indices[f_start + i]);
+                     s_indices_32[i] = static_cast<int>(__ldg(&batch_indices[f_start + i]));
                  } else {
-                     s_indices_64[i] = batch_indices[f_start + i];
+                     s_indices_64[i] = __ldg(&batch_indices[f_start + i]);
                  }
              }
              __syncthreads();
 
              // Accumulate into s_grad
              if (valid_out) {
-                 const float grad_out = static_cast<float>(grad_output[b * out_features + out_idx]);
+                 const float grad_out = static_cast<float>(__ldg(&grad_output[b * out_features + out_idx]));
                  for (int i = 0; i < chunk_size; i++) {
                      int idx = use_int32 ? s_indices_32[i] : static_cast<int>(s_indices_64[i]);
                      if (idx < in_features) {
@@ -409,25 +453,12 @@ __global__ void onehot_sparse_linear_backward_cached_kernel(
 // -------------------------------------------------------------------------
 
 // Compute optimal batch step based on shared memory requirements
-int computeOptimalBatchStep(int in_features, int out_features, int threads, size_t available_shm) {
-    // Calculate shared memory per batch
+int computeOptimalBatchStep(int in_features, int threads, size_t available_shm) {
     size_t s_grad_size = in_features * threads * sizeof(float);
     size_t s_grad_aligned = (s_grad_size + 7) / 8 * 8;
     size_t indices_size = MAX_SHARED_FEATURES * sizeof(int64_t);
-    size_t total_per_batch = s_grad_aligned + indices_size;
-
-    // We want to maximize batch_step while staying under shm limit
-    // and maintaining good occupancy
-    int max_step = 64;  // Upper limit for reasonable occupancy
-    int min_step = 8;   // Lower limit for efficiency
-
-    // Start from max and work down if needed
-    for (int step = max_step; step >= min_step; step /= 2) {
-        if (total_per_batch <= available_shm) {
-            return step;
-        }
-    }
-    return min_step;
+    size_t total = s_grad_aligned + indices_size;
+    return (total <= available_shm) ? 64 : 8;
 }
 
 torch::Tensor onehot_sparse_linear_forward_cuda(
@@ -435,6 +466,8 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
     torch::Tensor weight,
     torch::optional<torch::Tensor> bias
 ) {
+    const c10::cuda::OptionalCUDAGuard device_guard(weight.device());
+
     const int batch_size = indices.size(0);
     const int num_features = indices.size(1);
     const int out_features = weight.size(1);
@@ -449,6 +482,8 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
     AT_DISPATCH_V2(
         weight.scalar_type(), "onehot_sparse_linear_forward_cuda", AT_WRAP([&] {
 
+        auto stream = at::cuda::getCurrentCUDAStream();
+
         // Use vectorized kernel when out_features >= 4 for better memory coalescing
         const bool use_vectorized = (out_features >= 4);
 
@@ -458,7 +493,7 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
             const int blocks_y = (out_features + threads * 4 - 1) / (threads * 4);
             const dim3 blocks(batch_size, blocks_y);
 
-            onehot_sparse_linear_forward_kernel_vectorized<scalar_t><<<blocks, threads>>>(
+            onehot_sparse_linear_forward_kernel_vectorized<scalar_t><<<blocks, threads, 0, stream>>>(
                 indices.data_ptr<int64_t>(),
                 weight.data_ptr<scalar_t>(),
                 bias.has_value() ? bias.value().data_ptr<scalar_t>() : nullptr,
@@ -472,7 +507,7 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
             const int blocks_y = (out_features + threads - 1) / threads;
             const dim3 blocks(batch_size, blocks_y);
 
-            onehot_sparse_linear_forward_kernel_fast<scalar_t><<<blocks, threads>>>(
+            onehot_sparse_linear_forward_kernel_fast<scalar_t><<<blocks, threads, 0, stream>>>(
                 indices.data_ptr<int64_t>(),
                 weight.data_ptr<scalar_t>(),
                 bias.has_value() ? bias.value().data_ptr<scalar_t>() : nullptr,
@@ -486,7 +521,7 @@ torch::Tensor onehot_sparse_linear_forward_cuda(
             const int blocks_y = (out_features + threads - 1) / threads;
             const dim3 blocks(batch_size, blocks_y);
 
-            onehot_sparse_linear_forward_kernel_tiled<scalar_t><<<blocks, threads>>>(
+            onehot_sparse_linear_forward_kernel_tiled<scalar_t><<<blocks, threads, 0, stream>>>(
                 indices.data_ptr<int64_t>(),
                 weight.data_ptr<scalar_t>(),
                 bias.has_value() ? bias.value().data_ptr<scalar_t>() : nullptr,
@@ -508,6 +543,8 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
     torch::Tensor weight,
     bool has_bias
 ) {
+    const c10::cuda::OptionalCUDAGuard device_guard(weight.device());
+
     const int batch_size = indices.size(0);
     const int num_features = indices.size(1);
     const int in_features = weight.size(0);
@@ -539,6 +576,8 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
 
     // Dispatch on compute_dtype (always fp32 or fp64)
     AT_DISPATCH_V2(compute_dtype, "onehot_sparse_linear_backward_cuda", AT_WRAP([&] {
+        auto stream = at::cuda::getCurrentCUDAStream();
+
         // 1. Try Cached Kernel (for small InFeatures e.g. Reversi Board)
         // Only use if ALL shared memory requirements fit freely.
         bool use_cached = false;
@@ -565,7 +604,7 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
 
         if (use_cached) {
             // Dynamic batch step computation
-            const int batch_step = computeOptimalBatchStep(in_features, out_features, cached_threads, max_shared_mem);
+            const int batch_step = computeOptimalBatchStep(in_features, cached_threads, max_shared_mem);
             const int blocks_x = (batch_size + batch_step - 1) / batch_step;
             const int blocks_y_cached = (out_features + cached_threads - 1) / cached_threads;
             const dim3 blocks_cached(blocks_x, blocks_y_cached);
@@ -580,12 +619,12 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
 
         if (use_cached) {
             // Dynamic batch step computation (recalculate since use_cached may have changed)
-            const int batch_step = computeOptimalBatchStep(in_features, out_features, cached_threads, max_shared_mem);
+            const int batch_step = computeOptimalBatchStep(in_features, cached_threads, max_shared_mem);
             const int blocks_x = (batch_size + batch_step - 1) / batch_step;
             const int blocks_y_cached = (out_features + cached_threads - 1) / cached_threads;
             const dim3 blocks_cached(blocks_x, blocks_y_cached);
 
-            onehot_sparse_linear_backward_cached_kernel<scalar_t><<<blocks_cached, cached_threads, required_shm>>>(
+            onehot_sparse_linear_backward_cached_kernel<scalar_t><<<blocks_cached, cached_threads, required_shm, stream>>>(
                 indices.data_ptr<int64_t>(),
                 grad_output_compute.data_ptr<scalar_t>(),
                 grad_weight_compute.data_ptr<scalar_t>(),
@@ -606,7 +645,7 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
             if (num_features <= MAX_SHARED_FEATURES) {
                 // Fast kernel with shared memory for indices
                 const dim3 blocks_fast(batch_size, blocks_y);
-                onehot_sparse_linear_backward_weight_kernel_fast<scalar_t><<<blocks_fast, threads>>>(
+                onehot_sparse_linear_backward_weight_kernel_fast<scalar_t><<<blocks_fast, threads, 0, stream>>>(
                     indices.data_ptr<int64_t>(),
                     grad_output_compute.data_ptr<scalar_t>(),
                     grad_weight_compute.data_ptr<scalar_t>(),
@@ -617,7 +656,7 @@ std::tuple<torch::Tensor, torch::optional<torch::Tensor>> onehot_sparse_linear_b
             } else {
                 // Tiled kernel for large num_features
                 const dim3 blocks_tiled(batch_size, blocks_y);
-                onehot_sparse_linear_backward_weight_kernel_tiled<scalar_t><<<blocks_tiled, threads>>>(
+                onehot_sparse_linear_backward_weight_kernel_tiled<scalar_t><<<blocks_tiled, threads, 0, stream>>>(
                     indices.data_ptr<int64_t>(),
                     grad_output_compute.data_ptr<scalar_t>(),
                     grad_weight_compute.data_ptr<scalar_t>(),
