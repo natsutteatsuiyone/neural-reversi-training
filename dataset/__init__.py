@@ -74,8 +74,13 @@ class BinDataset(IterableDataset[BatchTuple]):
     ) -> None:
         super().__init__()
         self._validate_args(
-            filepaths, batch_size, file_usage_ratio,
-            prefetch_factor, ply_min, ply_max, decompress_workers
+            filepaths,
+            batch_size,
+            file_usage_ratio,
+            prefetch_factor,
+            ply_min,
+            ply_max,
+            decompress_workers,
         )
 
         self.filepaths = list(filepaths)
@@ -87,6 +92,7 @@ class BinDataset(IterableDataset[BatchTuple]):
         self.decompress_workers = decompress_workers
         self.prefetch_factor = prefetch_factor
         self.seed = seed
+        self._epoch = 0
         self._reader: _C.BinDatasetReader | None = None
 
     @staticmethod
@@ -136,6 +142,9 @@ class BinDataset(IterableDataset[BatchTuple]):
         Returns:
             Iterator yielding (scores, features, mobility, ply) tensor tuples.
         """
+        epoch_seed = (self.seed + self._epoch) if self.seed != 0 else 0
+        self._epoch += 1
+
         self._reader = _C.BinDatasetReader(
             self.filepaths,
             self.batch_size,
@@ -145,7 +154,7 @@ class BinDataset(IterableDataset[BatchTuple]):
             self.prefetch_factor,
             self.ply_min,
             self.ply_max,
-            self.seed,
+            epoch_seed,
         )
 
         worker_info = torch.utils.data.get_worker_info()

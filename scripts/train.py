@@ -144,6 +144,7 @@ def prepare_dataloaders(
         collate_fn=custom_collate_fn,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=num_workers > 0,
     )
 
     val_dataset = BinDataset(
@@ -159,6 +160,7 @@ def prepare_dataloaders(
         collate_fn=custom_collate_fn,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=num_workers > 0,
     )
 
     return train_loader, val_loader
