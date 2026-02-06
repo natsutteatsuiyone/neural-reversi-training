@@ -33,10 +33,10 @@ class BinDataset(IterableDataset[BatchTuple]):
     applying random symmetry transformations for data augmentation.
 
     The dataset yields batches of ``(scores, features, mobility, ply)`` tensors:
-        - ``scores``: Shape ``[batch_size, 1]``, float32 evaluation scores
-        - ``features``: Shape ``[batch_size, 20]``, int64 pattern indices
-        - ``mobility``: Shape ``[batch_size, 1]``, int64 legal move count
-        - ``ply``: Shape ``[batch_size, 1]``, int64 move number
+        - ``scores``: float32 evaluation scores
+        - ``features``: int64 pattern indices
+        - ``mobility``: int64 legal move count
+        - ``ply``: int64 move number
 
     Args:
         filepaths: List of paths to .bin data files.

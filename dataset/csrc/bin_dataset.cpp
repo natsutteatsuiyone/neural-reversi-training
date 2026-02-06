@@ -134,21 +134,6 @@ bool BinDatasetReader::fill_worker_buffer(BinWorkerContext &ctx) {
     constexpr size_t CHUNK_RECORDS = 32768; // Read 32K records at a time
     const size_t required_records = batch_size_;
 
-    // Try to get a new file if we don't have a reader
-    while (!ctx.reader) {
-        auto filepath = get_next_file();
-        if (!filepath) {
-            return false;
-        }
-        try {
-            ctx.reader = std::make_unique<BinStreamReader>(*filepath);
-        } catch (const std::exception &e) {
-            fprintf(stderr, "Warning: Failed to open %s: %s\n",
-                    filepath->c_str(), e.what());
-            continue;
-        }
-    }
-
     // Compact buffer when data_start is past halfway
     if (ctx.data_start > ctx.buffer.size() / 2) {
         ctx.compact();
@@ -156,6 +141,20 @@ bool BinDatasetReader::fill_worker_buffer(BinWorkerContext &ctx) {
 
     // Fill buffer until we have enough for a batch
     while (ctx.available_records() < required_records) {
+        // Ensure we have a valid reader, recovering from errors/EOF
+        while (!ctx.reader) {
+            auto filepath = get_next_file();
+            if (!filepath) {
+                return ctx.available_records() >= required_records;
+            }
+            try {
+                ctx.reader = std::make_unique<BinStreamReader>(*filepath);
+            } catch (const std::exception &e) {
+                fprintf(stderr, "Warning: Failed to open %s: %s\n",
+                        filepath->c_str(), e.what());
+            }
+        }
+
         size_t needed_capacity = ctx.data_end + CHUNK_RECORDS;
         if (ctx.buffer.size() < needed_capacity) {
             ctx.buffer.resize(needed_capacity);
@@ -169,39 +168,16 @@ bool BinDatasetReader::fill_worker_buffer(BinWorkerContext &ctx) {
             fprintf(stderr, "Warning: Read error, skipping file: %s\n",
                     e.what());
             ctx.reader.reset();
-            auto filepath = get_next_file();
-            if (!filepath) {
-                break;
-            }
-            try {
-                ctx.reader = std::make_unique<BinStreamReader>(*filepath);
-            } catch (const std::exception &e2) {
-                fprintf(stderr, "Warning: Failed to open %s: %s\n",
-                        filepath->c_str(), e2.what());
-                ctx.reader.reset();
-                continue;
-            }
             continue;
         }
         ctx.data_end += records_read;
 
         if (records_read == 0 || ctx.reader->eof()) {
             ctx.reader.reset();
-            auto filepath = get_next_file();
-            if (!filepath) {
-                break;
-            }
-            try {
-                ctx.reader = std::make_unique<BinStreamReader>(*filepath);
-            } catch (const std::exception &e) {
-                fprintf(stderr, "Warning: Failed to open %s: %s\n",
-                        filepath->c_str(), e.what());
-                continue;
-            }
         }
     }
 
-    return ctx.available_records() >= required_records;
+    return true;
 }
 
 std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx) {
@@ -219,22 +195,19 @@ std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx)
     int64_t *mobility_ptr = mobility.data_ptr<int64_t>();
     int64_t *ply_ptr = ply.data_ptr<int64_t>();
 
-    size_t total_filtered = 0;
+    size_t out_idx = 0;
 
-    while (true) {
+    while (out_idx < batch_size_) {
         if (!fill_worker_buffer(ctx)) {
-            if (total_filtered > 0) {
-                fprintf(stderr,
-                        "Warning: %zu records scanned but none matched ply "
-                        "range [%u, %u]\n",
-                        total_filtered, ply_min_, ply_max_);
-            }
-            return std::nullopt;
+            break;
+        }
+
+        if (shutdown_) {
+            break;
         }
 
         // Process records with ply filtering
         GameRecord *records = ctx.data_ptr();
-        size_t out_idx = 0;
         size_t in_idx = 0;
 
         while (out_idx < batch_size_ && in_idx < ctx.available_records()) {
@@ -253,32 +226,24 @@ std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx)
         }
 
         ctx.consume(in_idx);
-
-        // If this chunk had no records in range, try the next chunk instead of
-        // signaling end-of-data.
-        if (out_idx == 0) {
-            total_filtered += in_idx;
-            if (shutdown_) {
-                return std::nullopt;
-            }
-            continue;
-        }
-
-        if (out_idx < batch_size_) {
-            const auto n = static_cast<int64_t>(out_idx);
-            scores = scores.slice(0, 0, n);
-            features = features.slice(0, 0, n);
-            mobility = mobility.slice(0, 0, n);
-            ply = ply.slice(0, 0, n);
-        }
-
-        return std::make_tuple(scores, features, mobility, ply);
     }
+
+    if (out_idx == 0) {
+        return std::nullopt;
+    }
+
+    if (out_idx < batch_size_) {
+        const auto n = static_cast<int64_t>(out_idx);
+        scores = scores.slice(0, 0, n);
+        features = features.slice(0, 0, n);
+        mobility = mobility.slice(0, 0, n);
+        ply = ply.slice(0, 0, n);
+    }
+
+    return std::make_tuple(scores, features, mobility, ply);
 }
 
 void BinDatasetReader::worker_loop(size_t worker_id) {
-    active_workers_++;
-
     try {
         // Each worker gets a unique seed derived from the base seed
         BinWorkerContext ctx(seed_ + worker_id);
@@ -327,18 +292,17 @@ void BinDatasetReader::start_workers() {
     }
     filepaths_ = std::move(worker_files);
 
+    // Some DataLoader workers can receive an empty shard (e.g. num_workers >
+    // file count). Keep the shard empty so this worker exits cleanly.
     // Apply file_usage_ratio
-    size_t n_use = std::max(
-        static_cast<size_t>(1),
-        static_cast<size_t>(std::round(static_cast<double>(filepaths_.size()) *
-                                       file_usage_ratio_)));
-    filepaths_.resize(n_use);
-
-    // Check if we have any files to process
-    if (filepaths_.empty()) {
-        throw std::runtime_error(
-            "No data files available for this worker after file distribution");
+    size_t n_use = 0;
+    if (!filepaths_.empty()) {
+        n_use = std::max(
+            static_cast<size_t>(1),
+            static_cast<size_t>(std::round(static_cast<double>(filepaths_.size()) *
+                                           file_usage_ratio_)));
     }
+    filepaths_.resize(n_use);
 
     // Populate file queue
     for (const auto &filepath : filepaths_) {
@@ -348,7 +312,7 @@ void BinDatasetReader::start_workers() {
     batch_queue_ = std::make_unique<BoundedQueue<BatchTuple>>(prefetch_depth_);
 
     shutdown_ = false;
-    active_workers_ = 0;
+    active_workers_ = num_decompress_workers_;
 
     try {
         for (size_t i = 0; i < num_decompress_workers_; ++i) {

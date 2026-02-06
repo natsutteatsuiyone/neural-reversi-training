@@ -107,105 +107,31 @@ inline void apply_symmetry(uint64_t &player, uint64_t &opponent, int sym) {
     }
 }
 
+// Propagate flips in both directions along a ray.
+// mask: opponent pieces with edge masking to prevent wrap-around.
+// dir: shift amount in bits for the direction.
+inline uint64_t get_some_moves(uint64_t player, uint64_t mask, int dir) {
+    uint64_t flip = ((player << dir) | (player >> dir)) & mask;
+    flip |= ((flip << dir) | (flip >> dir)) & mask;
+    flip |= ((flip << dir) | (flip >> dir)) & mask;
+    flip |= ((flip << dir) | (flip >> dir)) & mask;
+    flip |= ((flip << dir) | (flip >> dir)) & mask;
+    flip |= ((flip << dir) | (flip >> dir)) & mask;
+    return (flip << dir) | (flip >> dir);
+}
+
 // Get legal moves for player given opponent position
 // Returns a bitboard of all legal move positions
 inline uint64_t get_legal_moves(uint64_t player, uint64_t opponent) {
     uint64_t empty = ~(player | opponent);
-    uint64_t legal = 0;
-
-    // Direction masks to avoid wrap-around
-    constexpr uint64_t not_a_file = 0xfefefefefefefefeULL;
-    constexpr uint64_t not_h_file = 0x7f7f7f7f7f7f7f7fULL;
-
-    // Check each direction
-    // Right (+1)
-    {
-        uint64_t mask = opponent & not_a_file;
-        uint64_t flip = mask & (player << 1);
-        flip |= mask & (flip << 1);
-        flip |= mask & (flip << 1);
-        flip |= mask & (flip << 1);
-        flip |= mask & (flip << 1);
-        flip |= mask & (flip << 1);
-        legal |= empty & (flip << 1);
-    }
-    // Left (-1)
-    {
-        uint64_t mask = opponent & not_h_file;
-        uint64_t flip = mask & (player >> 1);
-        flip |= mask & (flip >> 1);
-        flip |= mask & (flip >> 1);
-        flip |= mask & (flip >> 1);
-        flip |= mask & (flip >> 1);
-        flip |= mask & (flip >> 1);
-        legal |= empty & (flip >> 1);
-    }
-    // Down (+8)
-    {
-        uint64_t flip = opponent & (player << 8);
-        flip |= opponent & (flip << 8);
-        flip |= opponent & (flip << 8);
-        flip |= opponent & (flip << 8);
-        flip |= opponent & (flip << 8);
-        flip |= opponent & (flip << 8);
-        legal |= empty & (flip << 8);
-    }
-    // Up (-8)
-    {
-        uint64_t flip = opponent & (player >> 8);
-        flip |= opponent & (flip >> 8);
-        flip |= opponent & (flip >> 8);
-        flip |= opponent & (flip >> 8);
-        flip |= opponent & (flip >> 8);
-        flip |= opponent & (flip >> 8);
-        legal |= empty & (flip >> 8);
-    }
-    // Down-Right (+9)
-    {
-        uint64_t mask = opponent & not_a_file;
-        uint64_t flip = mask & (player << 9);
-        flip |= mask & (flip << 9);
-        flip |= mask & (flip << 9);
-        flip |= mask & (flip << 9);
-        flip |= mask & (flip << 9);
-        flip |= mask & (flip << 9);
-        legal |= empty & ((flip << 9) & not_a_file);
-    }
-    // Down-Left (+7)
-    {
-        uint64_t mask = opponent & not_h_file;
-        uint64_t flip = mask & (player << 7);
-        flip |= mask & (flip << 7);
-        flip |= mask & (flip << 7);
-        flip |= mask & (flip << 7);
-        flip |= mask & (flip << 7);
-        flip |= mask & (flip << 7);
-        legal |= empty & ((flip << 7) & not_h_file);
-    }
-    // Up-Right (-7)
-    {
-        uint64_t mask = opponent & not_a_file;
-        uint64_t flip = mask & (player >> 7);
-        flip |= mask & (flip >> 7);
-        flip |= mask & (flip >> 7);
-        flip |= mask & (flip >> 7);
-        flip |= mask & (flip >> 7);
-        flip |= mask & (flip >> 7);
-        legal |= empty & ((flip >> 7) & not_a_file);
-    }
-    // Up-Left (-9)
-    {
-        uint64_t mask = opponent & not_h_file;
-        uint64_t flip = mask & (player >> 9);
-        flip |= mask & (flip >> 9);
-        flip |= mask & (flip >> 9);
-        flip |= mask & (flip >> 9);
-        flip |= mask & (flip >> 9);
-        flip |= mask & (flip >> 9);
-        legal |= empty & ((flip >> 9) & not_h_file);
-    }
-
-    return legal;
+    // Direction masks applied to opponent to prevent wrap-around:
+    //   0x7E7E7E7E7E7E7E7E = excludes A-file and H-file (horizontal)
+    //   0x00FFFFFFFFFFFF00 = excludes rank 1 and rank 8 (vertical)
+    //   0x007E7E7E7E7E7E00 = excludes both edge files and edge ranks (diagonal)
+    return (get_some_moves(player, opponent & 0x7E7E7E7E7E7E7E7EULL, 1) & empty)
+         | (get_some_moves(player, opponent & 0x00FFFFFFFFFFFF00ULL, 8) & empty)
+         | (get_some_moves(player, opponent & 0x007E7E7E7E7E7E00ULL, 7) & empty)
+         | (get_some_moves(player, opponent & 0x007E7E7E7E7E7E00ULL, 9) & empty);
 }
 
 // Count the number of legal moves (mobility)

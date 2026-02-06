@@ -50,6 +50,7 @@ def run_benchmark(name, in_features, num_features, batch_size=1024*16):
     for _ in range(100):
         out = layer(indices)
         out.backward(grad_output)
+    torch.cuda.synchronize()
 
     # Total time forward+backward
     total_time = (time.time() - start) / 100 * 1000
