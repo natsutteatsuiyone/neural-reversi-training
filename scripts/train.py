@@ -127,6 +127,7 @@ def prepare_dataloaders(
     file_usage_ratio: float,
     shuffle: bool,
     seed: int,
+    ply_min: int = 0,
 ) -> tuple:
     train_files = [str(p) for p in Path(train_dir).glob("*.bin")]
     val_files = [str(p) for p in Path(val_dir).glob("*.bin")]
@@ -137,6 +138,7 @@ def prepare_dataloaders(
         file_usage_ratio=file_usage_ratio,
         shuffle=shuffle,
         seed=seed,
+        ply_min=ply_min,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -153,6 +155,7 @@ def prepare_dataloaders(
         file_usage_ratio=1.0,
         shuffle=False,
         seed=seed,
+        ply_min=ply_min,
     )
     val_loader = DataLoader(
         val_dataset,
@@ -224,6 +227,8 @@ def main():
 
     L.seed_everything(args.seed, workers=True)
 
+    ply_min = 30 if model_variant == "small" else 0
+
     train_loader, val_loader = prepare_dataloaders(
         args.train_data,
         args.val_data,
@@ -232,6 +237,7 @@ def main():
         args.file_usage_ratio,
         args.shuffle,
         args.seed,
+        ply_min=ply_min,
     )
 
     reversi_model = build_reversi_model(args)
