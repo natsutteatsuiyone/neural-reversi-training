@@ -7,7 +7,6 @@ Features:
     - Reads raw .bin files (24 bytes/record) directly
     - Real-time feature extraction with random symmetry augmentation
     - Multi-threaded batch prefetching for optimal GPU utilization
-    - Configurable ply filtering for training different model variants
 """
 
 from __future__ import annotations
@@ -43,8 +42,6 @@ class BinDataset(IterableDataset[BatchTuple]):
         batch_size: Number of records per batch.
         file_usage_ratio: Fraction of files to use per epoch (0.0, 1.0].
         shuffle: Whether to shuffle files before reading. Defaults to True.
-        ply_min: Minimum ply filter (inclusive). Defaults to 0.
-        ply_max: Maximum ply filter (inclusive). Defaults to 59.
         prefetch_factor: Number of batches to prefetch in background. Defaults to 4.
         decompress_workers: Number of C++ worker threads for processing.
             If 0 (default), automatically selects based on hardware concurrency.
@@ -66,8 +63,6 @@ class BinDataset(IterableDataset[BatchTuple]):
         batch_size: int,
         file_usage_ratio: float,
         shuffle: bool = True,
-        ply_min: int = 0,
-        ply_max: int = 59,
         prefetch_factor: int = 4,
         decompress_workers: int = 0,
         seed: int = 0,
@@ -78,8 +73,6 @@ class BinDataset(IterableDataset[BatchTuple]):
             batch_size,
             file_usage_ratio,
             prefetch_factor,
-            ply_min,
-            ply_max,
             decompress_workers,
         )
 
@@ -87,8 +80,6 @@ class BinDataset(IterableDataset[BatchTuple]):
         self.batch_size = batch_size
         self.file_usage_ratio = file_usage_ratio
         self.shuffle = shuffle
-        self.ply_min = ply_min
-        self.ply_max = ply_max
         self.decompress_workers = decompress_workers
         self.prefetch_factor = prefetch_factor
         self.seed = seed
@@ -101,8 +92,6 @@ class BinDataset(IterableDataset[BatchTuple]):
         batch_size: int,
         file_usage_ratio: float,
         prefetch_factor: int,
-        ply_min: int,
-        ply_max: int,
         decompress_workers: int,
     ) -> None:
         """Validate constructor arguments."""
@@ -119,12 +108,6 @@ class BinDataset(IterableDataset[BatchTuple]):
 
         if prefetch_factor < 1:
             raise ValueError(f"prefetch_factor must be >= 1, got {prefetch_factor}")
-
-        if ply_min < 0 or ply_max > 59 or ply_min > ply_max:
-            raise ValueError(
-                f"Invalid ply range: 0 <= ply_min <= ply_max <= 59 required, "
-                f"got ply_min={ply_min}, ply_max={ply_max}"
-            )
 
         if decompress_workers < 0:
             raise ValueError(
@@ -152,8 +135,6 @@ class BinDataset(IterableDataset[BatchTuple]):
             self.shuffle,
             self.decompress_workers,
             self.prefetch_factor,
-            self.ply_min,
-            self.ply_max,
             epoch_seed,
         )
 

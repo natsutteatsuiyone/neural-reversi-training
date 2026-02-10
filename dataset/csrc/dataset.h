@@ -174,7 +174,6 @@ class BinDatasetReader {
     BinDatasetReader(std::vector<std::string> filepaths, size_t batch_size,
                      double file_usage_ratio, bool shuffle,
                      size_t num_workers = 0, size_t prefetch_depth = 4,
-                     uint8_t ply_min = 0, uint8_t ply_max = 59,
                      uint64_t seed = 0);
     ~BinDatasetReader();
 
@@ -205,8 +204,6 @@ class BinDatasetReader {
     bool shuffle_;
     size_t num_decompress_workers_;
     size_t prefetch_depth_;
-    uint8_t ply_min_;
-    uint8_t ply_max_;
     uint64_t seed_;
 
     // DataLoader worker info

@@ -50,13 +50,12 @@ size_t BinStreamReader::read(GameRecord *buffer, size_t max_records) {
 BinDatasetReader::BinDatasetReader(std::vector<std::string> filepaths,
                                    size_t batch_size, double file_usage_ratio,
                                    bool shuffle, size_t num_workers,
-                                   size_t prefetch_depth, uint8_t ply_min,
-                                   uint8_t ply_max, uint64_t seed)
+                                   size_t prefetch_depth, uint64_t seed)
     : filepaths_(std::move(filepaths)), batch_size_(batch_size),
       file_usage_ratio_(file_usage_ratio), shuffle_(shuffle),
       num_decompress_workers_(num_workers == 0 ? default_decompress_workers()
                                                : num_workers),
-      prefetch_depth_(prefetch_depth), ply_min_(ply_min), ply_max_(ply_max),
+      prefetch_depth_(prefetch_depth),
       seed_(seed == 0 ? std::random_device{}() : seed),
       rng_(seed_) {
 
@@ -67,10 +66,6 @@ BinDatasetReader::BinDatasetReader(std::vector<std::string> filepaths,
 
     if (prefetch_depth_ == 0) {
         throw std::invalid_argument("prefetch_depth must be at least 1");
-    }
-
-    if (ply_min_ > ply_max_) {
-        throw std::invalid_argument("ply_min must be <= ply_max");
     }
 }
 
@@ -181,7 +176,6 @@ bool BinDatasetReader::fill_worker_buffer(BinWorkerContext &ctx) {
 }
 
 std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx) {
-    // Allocate output tensors once; reuse if we need to skip filtered chunks.
     const auto bs = static_cast<int64_t>(batch_size_);
 
     torch::Tensor scores = torch::empty({bs, 1}, torch::kFloat32);
@@ -206,16 +200,11 @@ std::optional<BatchTuple> BinDatasetReader::produce_batch(BinWorkerContext &ctx)
             break;
         }
 
-        // Process records with ply filtering
         GameRecord *records = ctx.data_ptr();
         size_t in_idx = 0;
 
         while (out_idx < batch_size_ && in_idx < ctx.available_records()) {
             const GameRecord &record = records[in_idx++];
-
-            if (record.ply < ply_min_ || record.ply > ply_max_) {
-                continue;
-            }
 
             process_game_record(record, ctx.rng,
                                 scores_ptr + out_idx,
