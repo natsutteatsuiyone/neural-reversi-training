@@ -30,6 +30,7 @@ SMALL_MODEL_CONFIG = QuantizationConfig(
     score_scale=64.0,
     eval_score_scale=256.0,
     weight_scale_hidden=64.0,
+    weight_scale_out=65536.0,  # eval_score_scale * 256.0
     quantized_one=1023.0,  # 10-bit quantization
     quantized_weight_max=127.0,
 )

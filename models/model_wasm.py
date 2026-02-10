@@ -30,6 +30,7 @@ WASM_MODEL_CONFIG = QuantizationConfig(
     score_scale=64.0,
     eval_score_scale=256.0,
     weight_scale_hidden=64.0,
+    weight_scale_out=32768.0,  # eval_score_scale * 128.0
     quantized_one=255.0,
     quantized_weight_max=127.0,
 )
@@ -69,7 +70,7 @@ class ReversiWasmModel(nn.Module):
         # Legacy attribute access for backward compatibility
         self.score_scale = config.score_scale
         self.eval_score_scale = config.eval_score_scale
-        self.weight_scale_out = config.eval_score_scale * 128.0  # WASM-specific
+        self.weight_scale_out = config.weight_scale_out
         self.quantized_one = config.quantized_one
 
         self.max_input_weight = config.quantized_weight_max / config.quantized_one

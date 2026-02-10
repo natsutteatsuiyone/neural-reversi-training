@@ -66,6 +66,7 @@ class QuantizationConfig:
         score_scale: Scale factor for training target scores.
         eval_score_scale: Scale factor for evaluation scores in inference.
         weight_scale_hidden: Scale factor for hidden layer weights.
+        weight_scale_out: Scale factor for output layer weights.
         quantized_one: Maximum value representing 1.0 after quantization.
         quantized_weight_max: Maximum absolute value for quantized weights.
     """
@@ -73,13 +74,9 @@ class QuantizationConfig:
     score_scale: float = 64.0
     eval_score_scale: float = 256.0
     weight_scale_hidden: float = 64.0
+    weight_scale_out: float = 16384.0  # eval_score_scale * weight_scale_hidden
     quantized_one: float = 255.0
     quantized_weight_max: float = 127.0
-
-    @property
-    def weight_scale_out(self) -> float:
-        """Compute output layer weight scale from component scales."""
-        return self.eval_score_scale * self.weight_scale_hidden
 
     @property
     def max_hidden_weight(self) -> float:
