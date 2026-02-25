@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
         default="large",
         help="Model architecture to train",
     )
+    parser.add_argument(
+        "--checkpoint_mode",
+        choices=("top_k", "periodic"),
+        default="top_k",
+        help="Checkpoint saving mode: top_k (best 32 by val_loss) or periodic (every 5 epochs)",
+    )
     args = parser.parse_args()
     return args
 
@@ -166,22 +172,31 @@ def prepare_dataloaders(
     return train_loader, val_loader
 
 
-def prepare_callbacks(model_variant: str) -> tuple:
+def prepare_callbacks(model_variant: str, checkpoint_mode: str) -> tuple:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     dirpath = "ckpt" if model_variant == "large" else f"ckpt/{model_variant}"
 
-    checkpoint_callback = ModelCheckpoint(
-        save_top_k=32,
-        save_last=False,
-        monitor="val_loss",
-        mode="min",
-        dirpath=dirpath,
-        filename="{epoch}-{val_loss:.8f}",
-        save_on_train_epoch_end=True,
-    )
+    if checkpoint_mode == "top_k":
+        checkpoint = ModelCheckpoint(
+            save_top_k=32,
+            save_last=False,
+            monitor="val_loss",
+            mode="min",
+            dirpath=dirpath,
+            filename="{epoch}-{val_loss:.8f}",
+            save_on_train_epoch_end=True,
+        )
+    else:
+        checkpoint = ModelCheckpoint(
+            every_n_epochs=5,
+            save_top_k=-1,
+            dirpath=dirpath,
+            filename="periodic-{epoch}",
+            save_on_train_epoch_end=True,
+        )
 
-    return [checkpoint_callback, lr_monitor]
+    return [checkpoint, lr_monitor]
 
 
 def build_reversi_model(args) -> L.LightningModule:
@@ -237,7 +252,7 @@ def main():
     reversi_model = build_reversi_model(args)
 
     logger = TensorBoardLogger("tb_logs", name="reversi_model")
-    callbacks = prepare_callbacks(model_variant)
+    callbacks = prepare_callbacks(model_variant, args.checkpoint_mode)
 
     trainer = L.Trainer(
         callbacks=callbacks,

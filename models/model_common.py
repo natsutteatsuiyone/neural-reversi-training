@@ -19,8 +19,6 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 # Feature configuration: number of parameters per feature pattern.
-# First 20 patterns use 3^8 = 6561 (8-cell patterns)
-# Last 4 patterns use 3^9 = 19683 (9-cell patterns)
 NUM_FEATURE_PARAMS: tuple[int, ...] = (
     6561,
     6561,

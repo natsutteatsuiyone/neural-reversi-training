@@ -27,20 +27,20 @@ enum Square : uint8_t {
 };
 // clang-format on
 
-// Pattern definitions matching Rust EVAL_F2X
+// Pattern definitions (v3 -- requires matching Rust EVAL_F2X update)
 // __ marks end of pattern (for patterns with fewer than 10 squares)
 constexpr uint8_t PATTERN_SQUARES[NUM_FEATURES][MAX_PATTERN_SIZE] = {
     // 8-square patterns (0-19), each has 3^8 = 6561 possible values
-    {C2, D2, B3, C3, D3, B4, C4, D4, __, __},  // 0: inner top-left
-    {F2, E2, G3, F3, E3, G4, F4, E4, __, __},  // 1: inner top-right
-    {C7, D7, B6, C6, D6, B5, C5, D5, __, __},  // 2: inner bottom-left
-    {F7, E7, G6, F6, E6, G5, F5, E5, __, __},  // 3: inner bottom-right
+    {C2, D2, E2, F2, C3, D3, E3, F3, __, __},  // 0: inner top
+    {C7, D7, E7, F7, C6, D6, E6, F6, __, __},  // 1: inner bottom
+    {B3, B4, B5, B6, C3, C4, C5, C6, __, __},  // 2: inner left
+    {G3, G4, G5, G6, F3, F4, F5, F6, __, __},  // 3: inner right
 
     {A1, B2, C3, D4, E5, F6, G7, H8, __, __},  // 4: diagonal A1-H8
     {H1, G2, F3, E4, D5, C6, B7, A8, __, __},  // 5: diagonal H1-A8
 
-    {D3, E4, F5, D4, E5, C4, D5, E6, __, __},  // 6: center pattern 1
-    {E3, D4, C5, E4, D5, F4, E5, D6, __, __},  // 7: center pattern 2
+    {C4, D4, E4, F4, C5, D5, E5, F5, __, __},  // 6: center 2x4 horizontal
+    {D3, E3, D4, E4, D5, E5, D6, E6, __, __},  // 7: center 2x4 vertical
 
     {A1, B1, C1, D1, E1, F1, G1, H1, __, __},  // 8: row 1
     {A8, B8, C8, D8, E8, F8, G8, H8, __, __},  // 9: row 8
