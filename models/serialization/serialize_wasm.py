@@ -26,11 +26,11 @@ class WasmNNWriter(BaseNNWriter):
 
     def write_input_layer(self, model: model_wasm.ReversiWasmModel) -> None:
         """Write the input layer to the buffer."""
-        bias = quantize_tensor(model.input.bias, model.quantized_one, torch.int16)
+        bias = quantize_tensor(model.input.bias, model.config.quantized_one, torch.int16)
         weight = model.input.weight.clamp(
             -model.max_input_weight, model.max_input_weight
         )
-        weight = quantize_tensor(weight, model.quantized_one, torch.int8)
+        weight = quantize_tensor(weight, model.config.quantized_one, torch.int8)
         self._write_dense_block_mixed("input", bias, "int16", weight, "int8")
 
     def write_fc_layer(
@@ -39,11 +39,10 @@ class WasmNNWriter(BaseNNWriter):
         layer: nn.Module,
     ) -> None:
         """Write a fully connected layer to the buffer."""
-        weight_scale_out = (
-            model.score_scale * model.weight_scale_out / model.quantized_one
-        )
+        cfg = model.config
+        weight_scale_out = cfg.score_scale * cfg.weight_scale_out / cfg.quantized_one
         weight_scale = weight_scale_out
-        bias_scale_out = model.weight_scale_out * model.score_scale
+        bias_scale_out = cfg.weight_scale_out * cfg.score_scale
         bias_scale = bias_scale_out
 
         with torch.no_grad():

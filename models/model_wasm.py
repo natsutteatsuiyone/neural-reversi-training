@@ -66,13 +66,6 @@ class ReversiWasmModel(nn.Module):
     def __init__(self, config: QuantizationConfig = WASM_MODEL_CONFIG) -> None:
         super().__init__()
         self.config = config
-
-        # Legacy attribute access for backward compatibility
-        self.score_scale = config.score_scale
-        self.eval_score_scale = config.eval_score_scale
-        self.weight_scale_out = config.weight_scale_out
-        self.quantized_one = config.quantized_one
-
         self.max_input_weight = config.quantized_weight_max / config.quantized_one
 
         # Feature offset buffer for converting raw indices to absolute indices

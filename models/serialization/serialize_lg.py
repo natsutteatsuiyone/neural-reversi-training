@@ -33,7 +33,7 @@ class LargeNNWriter(BaseNNWriter):
     def write_input_layer(self, model: model_lg.ReversiModel) -> None:
         """Write the input layer to the buffer."""
         base_layer = model.base_input
-        scale = model.quantized_one * 2
+        scale = model.config.quantized_one * 2
         ft_bias = quantize_tensor(base_layer.bias, scale, torch.int16)
         ft_weight = quantize_tensor(base_layer.weight, scale, torch.int16)
         self._write_dense_block("ft", ft_bias, ft_weight, "int16")
@@ -47,13 +47,12 @@ class LargeNNWriter(BaseNNWriter):
         self, model: model_lg.ReversiModel, layer: nn.Module, is_output: bool = False
     ) -> None:
         """Write a fully connected layer to the buffer."""
-        weight_scale_hidden = model.weight_scale_hidden
-        weight_scale_out = (
-            model.score_scale * model.weight_scale_out / model.quantized_one
-        )
+        cfg = model.config
+        weight_scale_hidden = cfg.weight_scale_hidden
+        weight_scale_out = cfg.score_scale * cfg.weight_scale_out / cfg.quantized_one
         weight_scale = weight_scale_out if is_output else weight_scale_hidden
-        bias_scale_out = model.weight_scale_out * model.score_scale
-        bias_scale_hidden = model.weight_scale_hidden * model.quantized_one
+        bias_scale_out = cfg.weight_scale_out * cfg.score_scale
+        bias_scale_hidden = cfg.weight_scale_hidden * cfg.quantized_one
         bias_scale = bias_scale_out if is_output else bias_scale_hidden
 
         with torch.no_grad():
@@ -65,7 +64,7 @@ class LargeNNWriter(BaseNNWriter):
             weight = weight_tensor.mul(weight_scale).round().to(torch.int16)
         else:
             weight = (
-                weight_tensor.clamp(-model.max_hidden_weight, model.max_hidden_weight)
+                weight_tensor.clamp(-cfg.max_hidden_weight, cfg.max_hidden_weight)
                 .mul(weight_scale)
                 .round()
                 .to(torch.int8)

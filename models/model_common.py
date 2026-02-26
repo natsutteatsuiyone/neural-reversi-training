@@ -212,7 +212,7 @@ class BaseLitReversiModel(L.LightningModule):
         """Compute loss for a single batch. Override if batch unpacking differs."""
         score_target, feature_indices, mobility, ply = batch
         score_pred = self(feature_indices, mobility, ply)
-        return F.mse_loss(score_pred, score_target / self.model.score_scale)
+        return F.mse_loss(score_pred, score_target / self.model.config.score_scale)
 
     def training_step(
         self,

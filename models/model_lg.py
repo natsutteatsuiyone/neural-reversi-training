@@ -1,4 +1,4 @@
-"""Main Reversi neural network model for full-strength evaluation."""
+"""Large Reversi neural network model for production evaluation."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from models.model_common import (
     FEATURE_CUM_OFFSETS,
     SUM_OF_FEATURES,
     BaseLitReversiModel,
-    ParamGroup,
     QuantizationConfig,
     WeightClipConfig,
     screlu,
@@ -37,9 +36,14 @@ MAX_PLY = 60
 
 
 class LayerStacks(nn.Module):
-    """Phase-bucketed layer stacks with skip connections.
+    """Phase-bucketed layer stacks with feature concatenation.
 
-    Architecture: inputs -> L1 -> L2 -> concat(L2, original_inputs) -> output
+    Architecture:
+        L1: [x_base|mob] and [x_pa|mob] -> l1_base, l1_pa (parallel)
+        Activation: cat(square(cat(l1_base, l1_pa)), cat(l1_base, l1_pa)), clamp [0,1]
+        L2: activated_l1 -> screlu
+        Output: cat(l2, x_base, x_pa) -> scalar
+
     All layers use ply-dependent weights selected by phase bucket.
     """
 
@@ -74,6 +78,8 @@ class LayerStacks(nn.Module):
         l1x_base = self.l1_base(x_base_with_mobility, ls_indices)
         l1x_pa = self.l1_pa(x_pa_with_mobility, ls_indices)
 
+        # Paired activation: concatenate squared and original L1 outputs,
+        # doubling the feature dimension to capture non-linear interactions.
         l1x = torch.cat([l1x_base, l1x_pa], dim=1)
         l1x_squared = l1x.pow(2) * self.activation_scale
         l1x = torch.cat([l1x_squared, l1x], dim=1)
@@ -107,15 +113,6 @@ class ReversiModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Legacy attribute access for backward compatibility
-        self.score_scale = config.score_scale
-        self.eval_score_scale = config.eval_score_scale
-        self.weight_scale_hidden = config.weight_scale_hidden
-        self.weight_scale_out = config.weight_scale_out
-        self.quantized_one = config.quantized_one
-        self.quantized_weight_max = config.quantized_weight_max
-        self.max_hidden_weight = config.max_hidden_weight
-
         self.register_buffer(
             "feature_offsets",
             torch.tensor(FEATURE_CUM_OFFSETS, dtype=torch.int64),
@@ -141,8 +138,9 @@ class ReversiModel(nn.Module):
         feature_indices = feature_indices + self.feature_offsets
 
         x_base = self.base_input(feature_indices)
+        # Bilinear activation: split into halves, clamp, and element-wise
+        # multiply (similar to Stockfish NNUE's paired-clipped-ReLU).
         x_base1, x_base2 = torch.split(x_base, LBASE // 2, dim=1)
-
         x_base1 = torch.clamp(x_base1, 0.0, 1.0)
         x_base2 = torch.clamp(x_base2, 0.0, 1.0)
         x_base = x_base1 * x_base2 * self.config.activation_scale
@@ -165,7 +163,7 @@ class LitReversiModel(BaseLitReversiModel):
         super().__init__(lr=lr, weight_decay=weight_decay, t_max=t_max, eta_min=eta_min)
 
         self.model = ReversiModel()
-        max_weight = self.model.max_hidden_weight
+        max_weight = self.model.config.max_hidden_weight
         layer_stacks = self.model.layer_stacks
         self.weight_clipping = [
             WeightClipConfig(
@@ -187,28 +185,3 @@ class LitReversiModel(BaseLitReversiModel):
     ) -> torch.Tensor:
         return self.model(feature_indices, mobility, ply)
 
-    def _build_param_groups(self) -> list[ParamGroup]:
-        """Separate sparse weights from other parameters."""
-        sparse_weight_suffixes = {"base_input.weight", "pa_input.input.weight"}
-        param_buckets: dict[str, list[nn.Parameter]] = {
-            "sparse": [],
-            "decay": [],
-            "no_decay": [],
-        }
-
-        for name, param in self.named_parameters():
-            if not param.requires_grad:
-                continue
-            if name.endswith(".bias") or param.dim() == 1:
-                param_buckets["no_decay"].append(param)
-            elif any(name.endswith(suffix) for suffix in sparse_weight_suffixes):
-                param_buckets["sparse"].append(param)
-            else:
-                param_buckets["decay"].append(param)
-
-        weight_decay = self.hparams.weight_decay
-        return [
-            {"params": param_buckets["sparse"], "weight_decay": weight_decay},
-            {"params": param_buckets["decay"], "weight_decay": weight_decay},
-            {"params": param_buckets["no_decay"], "weight_decay": 0.0},
-        ]

@@ -67,13 +67,6 @@ class ReversiSmallModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Legacy attribute access for backward compatibility
-        self.score_scale = config.score_scale
-        self.eval_score_scale = config.eval_score_scale
-        self.weight_scale_hidden = config.weight_scale_hidden
-        self.weight_scale_out = config.weight_scale_out
-        self.quantized_one = config.quantized_one
-
         # Feature offset buffer for converting raw indices to absolute indices
         self.register_buffer(
             "feature_offsets",
@@ -130,4 +123,4 @@ class LitReversiSmallModel(BaseLitReversiModel):
         score_target, feature_indices, _mobility, ply = batch
         ply = ply.sub(30)
         score_pred = self(feature_indices, ply)
-        return F.mse_loss(score_pred, score_target / self.model.score_scale)
+        return F.mse_loss(score_pred, score_target / self.model.config.score_scale)

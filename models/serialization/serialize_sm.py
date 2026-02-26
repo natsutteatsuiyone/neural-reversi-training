@@ -27,8 +27,8 @@ class SmallNNWriter(BaseNNWriter):
     def write_input_layer(self, model: model_sm.ReversiSmallModel) -> None:
         """Write the input layer to the buffer."""
         for pa_layer in model.pa_input.get_layers():
-            bias = quantize_tensor(pa_layer.bias, model.quantized_one, torch.int16)
-            weight = quantize_tensor(pa_layer.weight, model.quantized_one, torch.int16)
+            bias = quantize_tensor(pa_layer.bias, model.config.quantized_one, torch.int16)
+            weight = quantize_tensor(pa_layer.weight, model.config.quantized_one, torch.int16)
             self._write_dense_block("pa", bias, weight, "int16")
 
     def write_fc_layer(
@@ -38,15 +38,14 @@ class SmallNNWriter(BaseNNWriter):
         is_output: bool = False,
     ) -> None:
         """Write a fully connected layer to the buffer."""
-        weight_scale_hidden = model.weight_scale_hidden
-        weight_scale_out = (
-            model.score_scale * model.weight_scale_out / model.quantized_one
-        )
+        cfg = model.config
+        weight_scale_hidden = cfg.weight_scale_hidden
+        weight_scale_out = cfg.score_scale * cfg.weight_scale_out / cfg.quantized_one
         weight_scale = weight_scale_out if is_output else weight_scale_hidden
-        bias_scale_out = model.weight_scale_out * model.score_scale
-        bias_scale_hidden = model.weight_scale_hidden * model.quantized_one
+        bias_scale_out = cfg.weight_scale_out * cfg.score_scale
+        bias_scale_hidden = cfg.weight_scale_hidden * cfg.quantized_one
         bias_scale = bias_scale_out if is_output else bias_scale_hidden
-        max_weight = model.quantized_one / weight_scale
+        max_weight = cfg.quantized_one / weight_scale
 
         with torch.no_grad():
             bias_tensor = layer.bias.detach().cpu()
