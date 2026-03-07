@@ -22,10 +22,8 @@ from sparse_linear import SparseLinear
 # Layer dimensions
 LBASE = 256
 LPA = 128
-L1_BASE = (LBASE // 2) + 1  # Base input to L1 (+1 for mobility)
-L1_PA = LPA + 1  # Phase-adaptive input to L1 (+1 for mobility)
+L1 = (LBASE // 2) + LPA + 1  # Combined input to L1 (base + PA + mobility)
 L2 = 16
-L2_HALF = L2 // 2
 L3 = 64
 LOUTPUT = L3 + LPA + (LBASE // 2)
 
@@ -39,8 +37,8 @@ class LayerStacks(nn.Module):
     """Phase-bucketed layer stacks with feature concatenation.
 
     Architecture:
-        L1: [x_base|mob] and [x_pa|mob] -> l1_base, l1_pa (parallel)
-        Activation: cat(square(cat(l1_base, l1_pa)), cat(l1_base, l1_pa)), clamp [0,1]
+        L1: [x_base|x_pa|mob] -> l1
+        Activation: cat(square(l1), l1), clamp [0,1]
         L2: activated_l1 -> screlu
         Output: cat(l2, x_base, x_pa) -> scalar
 
@@ -54,8 +52,7 @@ class LayerStacks(nn.Module):
         self.activation_scale = activation_scale
 
         # Use StackedLinear for all phase-bucketed layers
-        self.l1_base = StackedLinear(L1_BASE, L2_HALF, count)
-        self.l1_pa = StackedLinear(L1_PA, L2_HALF, count)
+        self.l1 = StackedLinear(L1, L2, count)
         self.l2 = StackedLinear(L2 * 2, L3, count)
         self.output = StackedLinear(LOUTPUT, 1, count)
 
@@ -72,15 +69,11 @@ class LayerStacks(nn.Module):
         ls_indices = ply.view(-1) // self.bucket_size
 
         mobility_scaled = torch.clamp(mobility * (7.0 / 255.0), max=1.0)
-        x_base_with_mobility = torch.cat([x_base, mobility_scaled], dim=1)
-        x_pa_with_mobility = torch.cat([x_pa, mobility_scaled], dim=1)
-
-        l1x_base = self.l1_base(x_base_with_mobility, ls_indices)
-        l1x_pa = self.l1_pa(x_pa_with_mobility, ls_indices)
+        l1_input = torch.cat([x_base, x_pa, mobility_scaled], dim=1)
+        l1x = self.l1(l1_input, ls_indices)
 
         # Paired activation: concatenate squared and original L1 outputs,
         # doubling the feature dimension to capture non-linear interactions.
-        l1x = torch.cat([l1x_base, l1x_pa], dim=1)
         l1x_squared = l1x.pow(2) * self.activation_scale
         l1x = torch.cat([l1x_squared, l1x], dim=1)
         l1x = torch.clamp(l1x, 0.0, 1.0)
@@ -95,12 +88,11 @@ class LayerStacks(nn.Module):
 
     def get_layer_stacks(
         self,
-    ) -> Iterator[tuple[nn.Linear, nn.Linear, nn.Linear, nn.Linear]]:
-        """Yield (l1_base, l1_pa, l2, output) for each stack."""
+    ) -> Iterator[tuple[nn.Linear, nn.Linear, nn.Linear]]:
+        """Yield (l1, l2, output) for each stack."""
         for i in range(self.count):
             yield (
-                self.l1_base.at_index(i),
-                self.l1_pa.at_index(i),
+                self.l1.at_index(i),
                 self.l2.at_index(i),
                 self.output.at_index(i),
             )
@@ -168,8 +160,7 @@ class LitReversiModel(BaseLitReversiModel):
         self.weight_clipping = [
             WeightClipConfig(
                 params=[
-                    layer_stacks.l1_base.linear.weight,
-                    layer_stacks.l1_pa.linear.weight,
+                    layer_stacks.l1.linear.weight,
                     layer_stacks.l2.linear.weight,
                 ],
                 min_weight=-max_weight,

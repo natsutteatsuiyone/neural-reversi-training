@@ -24,9 +24,8 @@ class LargeNNWriter(BaseNNWriter):
     def write_model(self, model: Any) -> None:
         """Write the large model to the internal buffer."""
         self.write_input_layer(model)
-        for l1_base, l1_ps, l2, output in model.layer_stacks.get_layer_stacks():
-            self.write_fc_layer(model, l1_base)
-            self.write_fc_layer(model, l1_ps)
+        for l1, l2, output in model.layer_stacks.get_layer_stacks():
+            self.write_fc_layer(model, l1)
             self.write_fc_layer(model, l2)
             self.write_fc_layer(model, output, is_output=True)
 
