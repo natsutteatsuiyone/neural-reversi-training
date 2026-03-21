@@ -27,7 +27,7 @@ enum Square : uint8_t {
 };
 // clang-format on
 
-// Pattern definitions (v3 -- requires matching Rust EVAL_F2X update)
+// Pattern definitions (v5 -- requires matching Rust EVAL_F2X update)
 // __ marks end of pattern (for patterns with fewer than 10 squares)
 constexpr uint8_t PATTERN_SQUARES[NUM_FEATURES][MAX_PATTERN_SIZE] = {
     // 8-square patterns (0-19), each has 3^8 = 6561 possible values
@@ -61,6 +61,18 @@ constexpr uint8_t PATTERN_SQUARES[NUM_FEATURES][MAX_PATTERN_SIZE] = {
     {H1, G1, F1, H2, G2, F2, H3, G3, F3, __},  // 21: corner H1 3x3
     {A8, B8, C8, A7, B7, C7, A6, B6, C6, __},  // 22: corner A8 3x3
     {H8, G8, F8, H7, G7, F7, H6, G6, F6, __},  // 23: corner H8 3x3
+
+    // 9-square patterns (24-27), each has 3^9 = 19683 possible values
+    {B2, C2, D2, B3, C3, D3, B4, C4, D4, __},  // 24: center 3x3 NW
+    {G2, F2, E2, G3, F3, E3, G4, F4, E4, __},  // 25: center 3x3 NE
+    {B7, C7, D7, B6, C6, D6, B5, C5, D5, __},  // 26: center 3x3 SW
+    {G7, F7, E7, G6, F6, E6, G5, F5, E5, __},  // 27: center 3x3 SE
+
+    // 7-square patterns (28-31), each has 3^7 = 2187 possible values
+    {B1, C2, D3, E4, F5, G6, H7, __, __, __},  // 28: adjacent diagonal B1-H7
+    {A2, B3, C4, D5, E6, F7, G8, __, __, __},  // 29: adjacent diagonal A2-G8
+    {G1, F2, E3, D4, C5, B6, A7, __, __, __},  // 30: adjacent diagonal G1-A7
+    {H2, G3, F4, E5, D6, C7, B8, __, __, __},  // 31: adjacent diagonal H2-B8
 };
 
 // Number of squares in each pattern
@@ -70,7 +82,9 @@ constexpr uint8_t PATTERN_SIZES[NUM_FEATURES] = {
     8, 8, 8, 8,
     8, 8, 8, 8,
     8, 8, 8, 8,
-    9, 9, 9, 9
+    9, 9, 9, 9,
+    9, 9, 9, 9,
+    7, 7, 7, 7,
 };
 
 // Extract features from a board position

@@ -22,7 +22,7 @@
 
 namespace dataset {
 
-constexpr size_t NUM_FEATURES = 24;
+constexpr size_t NUM_FEATURES = 32;
 constexpr size_t BIN_RECORD_SIZE = 24;
 
 // GameRecord: raw binary record from .bin files (24 bytes)

@@ -93,20 +93,20 @@ def benchmark():
     print("\n-------------------------------------------------------------")
     print("Case 1: Reversi Board (Small InF, High Contention)")
     print("Expectation: Cached Kernel (Fastest)")
-    fwd_s, bwd_s = run_benchmark("Reversi Board", in_features=64, num_features=24)
+    fwd_s, bwd_s = run_benchmark("Reversi Board", in_features=64, num_features=32)
 
     # Case 2: Pattern Features (Large InF, High Contention) -> Should use Standard Kernel
-    # model_common.py: InF ~ 215k
+    # model_common.py: InF ~ 297k
     print("\n-------------------------------------------------------------")
     print("Case 2: Pattern Features (Large InF, High Contention)")
     print("Expectation: Standard Kernel (Robust)")
-    fwd_l, bwd_l = run_benchmark("Pattern Features", in_features=209952, num_features=24)
+    fwd_l, bwd_l = run_benchmark("Pattern Features", in_features=297432, num_features=32)
 
     # Safety check: indices with num_features > 128
     print("\n-------------------------------------------------------------")
     print("Case 3: Safety Check (NumF=256)")
     try:
-        in_features = 209952
+        in_features = 236196
         batch_size = 1024 * 16
         layer = SparseLinear(in_features, 128, bias=True).to(device)
         indices_large = torch.randint(0, in_features, (batch_size, 256), device=device, dtype=torch.int64)

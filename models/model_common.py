@@ -44,6 +44,14 @@ NUM_FEATURE_PARAMS: tuple[int, ...] = (
     19683,
     19683,
     19683,
+    19683,
+    19683,
+    19683,
+    19683,
+    2187,
+    2187,
+    2187,
+    2187,
 )
 
 NUM_FEATURES = len(NUM_FEATURE_PARAMS)
