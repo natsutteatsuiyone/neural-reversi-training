@@ -23,23 +23,25 @@
 namespace dataset {
 
 constexpr size_t NUM_FEATURES = 32;
-constexpr size_t BIN_RECORD_SIZE = 24;
+constexpr size_t BIN_RECORD_SIZE = 27;
 
-// GameRecord: raw binary record from .bin files (24 bytes)
+// GameRecord: raw binary record from .bin files (27 bytes)
 #pragma pack(push, 1)
 struct GameRecord {
-    uint64_t player;     // 8 bytes: player's bitboard
-    uint64_t opponent;   // 8 bytes: opponent's bitboard
-    float score;         // 4 bytes: evaluation score
-    int8_t game_score;   // 1 byte: final game score
-    uint8_t ply;         // 1 byte: move number
-    uint8_t is_random;   // 1 byte: random move flag
-    uint8_t move;        // 1 byte: move (unused)
+    uint64_t player;       // 8 bytes: player's bitboard
+    uint64_t opponent;     // 8 bytes: opponent's bitboard
+    float score;           // 4 bytes: evaluation score
+    int8_t game_score;     // 1 byte: final game score
+    uint8_t ply;           // 1 byte: move number
+    uint8_t is_random;     // 1 byte: random move flag
+    uint8_t move;          // 1 byte: move square
+    uint8_t side_to_move;  // 1 byte: 0=Black, 1=White
+    uint16_t game_id;      // 2 bytes: game identifier
 };
 #pragma pack(pop)
 
 static_assert(sizeof(GameRecord) == BIN_RECORD_SIZE,
-              "GameRecord must be exactly 24 bytes");
+              "GameRecord must be exactly 27 bytes");
 
 /// Thread-safe bounded queue for producer-consumer pattern.
 /// Blocks on push when full and on pop when empty.
