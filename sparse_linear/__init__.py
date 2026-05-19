@@ -68,15 +68,19 @@ class SparseLinear(nn.Module):
     exactly one feature index.
 
     Constraints:
-        - **CUDA-only**: This layer requires CUDA tensors; CPU tensors are not supported.
-        - **int64 indices**: Input indices must be of dtype torch.int64 (torch.long).
-        - **Valid indices**: All index values must be in range [0, in_features).
-          Out-of-bounds indices cause undefined behavior.
-        - **Performance Note**: The kernel uses shared memory index caching for `num_features <= 128`
-          and a vectorized implementation with register accumulation for `out_features >= 4`.
-          Larger feature counts use a tiled implementation.
-        - **Compilation note**: When using --use_fast_math NVCC flag, floating-point
-          operations may have reduced precision due to fast math optimizations.
+        - **CUDA-only**: requires CUDA tensors; CPU is not supported.
+        - **int64 indices**: indices must be torch.int64 (torch.long), shape
+          [batch_size, num_features].
+        - **dtype**: weight must be float32, bfloat16, or float16 (float64 is
+          not supported). bf16/fp16 backward is computed in fp32.
+        - **num_features <= 128**: the backward kernel caches each sample's
+          indices in shared memory; a larger second dim raises an error.
+        - **Valid indices**: index values should be in [0, in_features).
+          Out-of-range or negative values are defensively skipped (no crash
+          or memory corruption) but produce an incorrect result for that
+          entry — an out-of-range index signals an upstream data bug.
+        - **Compilation note**: with the --use_fast_math NVCC flag,
+          floating-point operations may have reduced precision.
 
     Args:
         in_features (int): input dimension (total number of possible feature indices)

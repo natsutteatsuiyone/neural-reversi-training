@@ -45,7 +45,7 @@ For optimal training performance, install NVIDIA Apex:
 ```bash
 # Install NVIDIA Apex for optimized training
 git clone https://github.com/NVIDIA/apex
-APEX_CPP_EXT=1 APEX_CUDA_EXT=1 uv pip install -v --no-build-isolation ./apex/
+TORCH_CUDA_ARCH_LIST=12.0 APEX_CPP_EXT=1 APEX_CUDA_EXT=1 uv pip install -v --no-build-isolation ./apex/
 ```
 
 ## Training
