@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+
 import argparse
 import sys
 from pathlib import Path
@@ -6,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import torch
+from torch.optim.swa_utils import get_ema_multi_avg_fn
 from torch.utils.data import DataLoader
 import lightning as L
 
@@ -13,11 +16,21 @@ from dataset import BinDataset, custom_collate_fn
 
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import WeightAveraging
 from lightning.pytorch.loggers import TensorBoardLogger
 
 from models import model_lg
 from models import model_sm
 from models import model_wasm
+
+
+def ema_decay(value: str) -> float:
+    decay = float(value)
+    if not 0.0 <= decay < 1.0:
+        raise argparse.ArgumentTypeError(
+            f"EMA decay must be in [0.0, 1.0), got {decay}"
+        )
+    return decay
 
 
 def parse_args() -> argparse.Namespace:
@@ -97,6 +110,17 @@ def parse_args() -> argparse.Namespace:
         default="top_k",
         help="Checkpoint saving mode: top_k (best 32 by val_loss) or periodic (every 5 epochs)",
     )
+    parser.add_argument(
+        "--ema",
+        action="store_true",
+        help="Apply exponential moving average weights during validation and checkpointing",
+    )
+    parser.add_argument(
+        "--ema_decay",
+        type=ema_decay,
+        default=0.999,
+        help="EMA decay used when --ema is enabled",
+    )
     args = parser.parse_args()
     return args
 
@@ -172,7 +196,12 @@ def prepare_dataloaders(
     return train_loader, val_loader
 
 
-def prepare_callbacks(model_variant: str, checkpoint_mode: str) -> tuple:
+def prepare_callbacks(
+    model_variant: str,
+    checkpoint_mode: str,
+    use_ema: bool,
+    ema_decay_value: float,
+) -> list:
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     dirpath = "ckpt" if model_variant == "large" else f"ckpt/{model_variant}"
@@ -196,7 +225,13 @@ def prepare_callbacks(model_variant: str, checkpoint_mode: str) -> tuple:
             save_on_train_epoch_end=True,
         )
 
-    return [checkpoint, lr_monitor]
+    callbacks = [checkpoint, lr_monitor]
+    if use_ema:
+        callbacks.append(
+            WeightAveraging(multi_avg_fn=get_ema_multi_avg_fn(decay=ema_decay_value))
+        )
+
+    return callbacks
 
 
 def build_reversi_model(args) -> L.LightningModule:
@@ -252,7 +287,12 @@ def main():
     reversi_model = build_reversi_model(args)
 
     logger = TensorBoardLogger("tb_logs", name="reversi_model")
-    callbacks = prepare_callbacks(model_variant, args.checkpoint_mode)
+    callbacks = prepare_callbacks(
+        model_variant,
+        args.checkpoint_mode,
+        args.ema,
+        args.ema_decay,
+    )
 
     trainer = L.Trainer(
         callbacks=callbacks,
